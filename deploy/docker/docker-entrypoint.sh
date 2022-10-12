@@ -46,49 +46,49 @@ fi
 
 # Set hosts to prevent cluster mode failed
 
-if [[ -z "$EMQX_NODE__PROCESS_LIMIT" ]]; then
-    export EMQX_NODE__PROCESS_LIMIT=2097152
-fi
-
-if [[ -z "$EMQX_NODE__MAX_PORTS" ]]; then
-    export EMQX_NODE__MAX_PORTS=1048576
-fi
-
-if [[ -z "$EMQX_NODE__MAX_ETS_TABLES" ]]; then
-    export EMQX_NODE__MAX_ETS_TABLES=2097152
-fi
-
-if [[ -z "$EMQX_LISTENER__TCP__EXTERNAL__ACCEPTORS" ]]; then
-    export EMQX_LISTENER__TCP__EXTERNAL__ACCEPTORS=64
-fi
-
-if [[ -z "$EMQX_LISTENER__TCP__EXTERNAL__MAX_CONNECTIONS" ]]; then
-    export EMQX_LISTENER__TCP__EXTERNAL__MAX_CONNECTIONS=1024000
-fi
-
-if [[ -z "$EMQX_LISTENER__SSL__EXTERNAL__ACCEPTORS" ]]; then
-    export EMQX_LISTENER__SSL__EXTERNAL__ACCEPTORS=32
-fi
-
-if [[ -z "$EMQX_LISTENER__SSL__EXTERNAL__MAX_CONNECTIONS" ]]; then
-    export EMQX_LISTENER__SSL__EXTERNAL__MAX_CONNECTIONS=102400
-fi
-
-if [[ -z "$EMQX_LISTENER__WS__EXTERNAL__ACCEPTORS" ]]; then
-    export EMQX_LISTENER__WS__EXTERNAL__ACCEPTORS=16
-fi
-
-if [[ -z "$EMQX_LISTENER__WS__EXTERNAL__MAX_CONNECTIONS" ]]; then
-    export EMQX_LISTENER__WS__EXTERNAL__MAX_CONNECTIONS=102400
-fi
-
-if [[ -z "$EMQX_LISTENER__WSS__EXTERNAL__ACCEPTORS" ]]; then
-    export EMQX_LISTENER__WSS__EXTERNAL__ACCEPTORS=16
-fi
-
-if [[ -z "$EMQX_LISTENER__WSS__EXTERNAL__MAX_CONNECTIONS" ]]; then
-    export EMQX_LISTENER__WSS__EXTERNAL__MAX_CONNECTIONS=102400
-fi
+#if [[ -z "$EMQX_NODE__PROCESS_LIMIT" ]]; then
+#    export EMQX_NODE__PROCESS_LIMIT=2097152
+#fi
+#
+#if [[ -z "$EMQX_NODE__MAX_PORTS" ]]; then
+#    export EMQX_NODE__MAX_PORTS=1048576
+#fi
+#
+#if [[ -z "$EMQX_NODE__MAX_ETS_TABLES" ]]; then
+#    export EMQX_NODE__MAX_ETS_TABLES=2097152
+#fi
+#
+#if [[ -z "$EMQX_LISTENER__TCP__EXTERNAL__ACCEPTORS" ]]; then
+#    export EMQX_LISTENER__TCP__EXTERNAL__ACCEPTORS=64
+#fi
+#
+#if [[ -z "$EMQX_LISTENER__TCP__EXTERNAL__MAX_CONNECTIONS" ]]; then
+#    export EMQX_LISTENER__TCP__EXTERNAL__MAX_CONNECTIONS=1024000
+#fi
+#
+#if [[ -z "$EMQX_LISTENER__SSL__EXTERNAL__ACCEPTORS" ]]; then
+#    export EMQX_LISTENER__SSL__EXTERNAL__ACCEPTORS=32
+#fi
+#
+#if [[ -z "$EMQX_LISTENER__SSL__EXTERNAL__MAX_CONNECTIONS" ]]; then
+#    export EMQX_LISTENER__SSL__EXTERNAL__MAX_CONNECTIONS=102400
+#fi
+#
+#if [[ -z "$EMQX_LISTENER__WS__EXTERNAL__ACCEPTORS" ]]; then
+#    export EMQX_LISTENER__WS__EXTERNAL__ACCEPTORS=16
+#fi
+#
+#if [[ -z "$EMQX_LISTENER__WS__EXTERNAL__MAX_CONNECTIONS" ]]; then
+#    export EMQX_LISTENER__WS__EXTERNAL__MAX_CONNECTIONS=102400
+#fi
+#
+#if [[ -z "$EMQX_LISTENER__WSS__EXTERNAL__ACCEPTORS" ]]; then
+#    export EMQX_LISTENER__WSS__EXTERNAL__ACCEPTORS=16
+#fi
+#
+#if [[ -z "$EMQX_LISTENER__WSS__EXTERNAL__MAX_CONNECTIONS" ]]; then
+#    export EMQX_LISTENER__WSS__EXTERNAL__MAX_CONNECTIONS=102400
+#fi
 
 # fill tuples on specific file
 # SYNOPSIS
@@ -98,7 +98,7 @@ fill_tuples() {
     local elements=${*:2}
     for var in $elements; do
         if grep -qE "\{\s*$var\s*,\s*(true|false)\s*\}\s*\." "$file"; then
-            sed -r "s/\{\s*($var)\s*,\s*(true|false)\s*\}\s*\./{\1, true}./1" "$file" > tmpfile && cat tmpfile > "$file" 
+            sed -r "s/\{\s*($var)\s*,\s*(true|false)\s*\}\s*\./{\1, true}./1" "$file" > tmpfile && cat tmpfile > "$file"
         elif grep -q "$var\s*\." "$file"; then
             # backward compatible.
             sed -r "s/($var)\s*\./{\1, true}./1" "$file" > tmpfile && cat tmpfile > "$file"
