@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2020-2021 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2020-2022 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -91,15 +91,6 @@
 
 -define(ENABLED(X), (X =/= undefined)).
 
--elvis([{elvis_style, invalid_dynamic_call, #{ignore => [emqx_stomp_connection]}}]).
-
--dialyzer({nowarn_function, [ ensure_stats_timer/2
-                            ]}).
-
--dialyzer({no_return, [ init/1
-                      , init_state/3
-                      ]}).
-
 start_link(Transport, Sock, ProtoEnv) ->
     {ok, proc_lib:spawn_link(?MODULE, init, [[Transport, Sock, ProtoEnv]])}.
 
@@ -145,6 +136,7 @@ call(Pid, Req) ->
 call(Pid, Req, Timeout) ->
     gen_server:call(Pid, Req, Timeout).
 
+-spec init([term()]) -> no_return().
 init([Transport, RawSocket, ProtoEnv]) ->
     case Transport:wait(RawSocket) of
         {ok, Socket} ->
@@ -154,6 +146,7 @@ init([Transport, RawSocket, ProtoEnv]) ->
             exit_on_sock_error(Reason)
     end.
 
+-spec init_state(module(), port(), [proplists:property()]) -> no_return().
 init_state(Transport, Socket, ProtoEnv) ->
     {ok, Peername} = Transport:ensure_ok_or_exit(peername, [Socket]),
     {ok, Sockname} = Transport:ensure_ok_or_exit(sockname, [Socket]),

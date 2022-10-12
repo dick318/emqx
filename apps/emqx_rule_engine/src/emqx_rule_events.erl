@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2020-2021 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2020-2022 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -172,18 +172,18 @@ eventmsg_connected(_ClientInfo = #{
                     is_bridge := IsBridge,
                     mountpoint := Mountpoint
                    },
-                   _ConnInfo = #{
+                   ConnInfo = #{
                     peername := PeerName,
                     sockname := SockName,
                     clean_start := CleanStart,
                     proto_name := ProtoName,
                     proto_ver := ProtoVer,
-                    keepalive := Keepalive,
                     connected_at := ConnectedAt,
-                    conn_props := ConnProps,
-                    receive_maximum := RcvMax,
-                    expiry_interval := ExpiryInterval
+                    receive_maximum := RcvMax
                    }) ->
+    Keepalive = maps:get(keepalive, ConnInfo, 0),
+    ConnProps = maps:get(conn_props, ConnInfo, #{}),
+    ExpiryInterval = maps:get(expiry_interval, ConnInfo, 0),
     with_basic_columns('client.connected',
         #{clientid => ClientId,
           username => Username,
@@ -208,6 +208,8 @@ eventmsg_disconnected(_ClientInfo = #{
                       ConnInfo = #{
                         peername := PeerName,
                         sockname := SockName,
+                        proto_name := ProtoName,
+                        proto_ver := ProtoVer,
                         disconnected_at := DisconnectedAt
                       }, Reason) ->
     with_basic_columns('client.disconnected',
@@ -216,6 +218,8 @@ eventmsg_disconnected(_ClientInfo = #{
           username => Username,
           peername => ntoa(PeerName),
           sockname => ntoa(SockName),
+          proto_name => ProtoName,
+          proto_ver => ProtoVer,
           disconn_props => printable_maps(maps:get(disconn_props, ConnInfo, #{})),
           disconnected_at => DisconnectedAt
         }).
@@ -597,6 +601,8 @@ columns_with_exam('client.disconnected') ->
     , {<<"username">>, <<"u_emqx">>}
     , {<<"peername">>, <<"192.168.0.10:56431">>}
     , {<<"sockname">>, <<"0.0.0.0:1883">>}
+    , {<<"proto_name">>, <<"MQTT">>}
+    , {<<"proto_ver">>, 5}
     , {<<"disconnected_at">>, erlang:system_time(millisecond)}
     , {<<"timestamp">>, erlang:system_time(millisecond)}
     , {<<"node">>, node()}

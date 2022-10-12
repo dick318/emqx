@@ -5,12 +5,14 @@ on:
     tags:
       - v*
       - e*
+    branches:
+      - 'main-v4.[0-9]?'
   pull_request:
 
 jobs:
     run_proper_test:
         runs-on: ubuntu-20.04
-        container: emqx/build-env:erl23.2.7.2-emqx-3-ubuntu20.04
+        container: emqx/build-env:erl23.3.4.9-3-ubuntu20.04
 
         steps:
         - uses: actions/checkout@v2
@@ -24,20 +26,24 @@ jobs:
           run: make proper
 
     run_common_test:
-        runs-on: ubuntu-20.04
-
+        runs-on: ${{ matrix.runs-on }}
+        strategy:
+          fail-fast: false
+          matrix:
+            runs-on:
+              - aws-amd64
+              - ubuntu-20.04
+            use-self-hosted:
+              - ${{ github.repository_owner == 'emqx' }}
+            exclude:
+              - runs-on: ubuntu-20.04
+                use-self-hosted: true
+              - runs-on: aws-amd64
+                use-self-hosted: false
         steps:
         - uses: actions/checkout@v2
-        - name: set edition
-          id: set_edition
-          run: |
-            if make emqx-ee --dry-run > /dev/null 2>&1; then
-                echo "EDITION=enterprise" >> $GITHUB_ENV
-            else
-                echo "EDITION=opensource" >> $GITHUB_ENV
-            fi
         - name: docker compose up
-          if: env.EDITION == 'opensource'
+          if: endsWith(github.repository, 'emqx')
           env:
             MYSQL_TAG: 8
             REDIS_TAG: 6
@@ -48,6 +54,7 @@ jobs:
           run: |
             docker-compose \
                 -f .ci/docker-compose-file/docker-compose.yaml \
+                -f .ci/docker-compose-file/docker-compose-toxiproxy.yaml \
                 -f .ci/docker-compose-file/docker-compose-ldap-tcp.yaml \
                 -f .ci/docker-compose-file/docker-compose-mongo-tcp.yaml \
                 -f .ci/docker-compose-file/docker-compose-mysql-tcp.yaml \
@@ -55,7 +62,7 @@ jobs:
                 -f .ci/docker-compose-file/docker-compose-redis-single-tcp.yaml \
                 up -d --build
         - name: docker compose up
-          if: env.EDITION == 'enterprise'
+          if: endsWith(github.repository, 'emqx-enterprise')
           env:
             MYSQL_TAG: 8
             REDIS_TAG: 6
@@ -75,6 +82,7 @@ jobs:
           run: |
             docker-compose \
                 -f .ci/docker-compose-file/docker-compose.yaml \
+                -f .ci/docker-compose-file/docker-compose-toxiproxy.yaml \
                 -f .ci/docker-compose-file/docker-compose-ldap-tcp.yaml \
                 -f .ci/docker-compose-file/docker-compose-mongo-tcp.yaml \
                 -f .ci/docker-compose-file/docker-compose-mysql-tcp.yaml \
@@ -93,6 +101,7 @@ jobs:
                 -f .ci/docker-compose-file/docker-compose-enterprise-pgsql-and-timescale-client.yaml \
                 up -d --build
             docker exec -i erlang bash -c "echo \"https://ci%40emqx.io:${{ secrets.CI_GIT_TOKEN }}@github.com\" > /root/.git-credentials && git config --global credential.helper store"
+            docker exec -i erlang bash -c "git config --global --add safe.directory /emqx"
             while [ $(docker ps -a --filter name=client --filter exited=0 | wc -l) \
                  != $(docker ps -a --filter name=client | wc -l) ]; do
               sleep 5
@@ -106,6 +115,7 @@ jobs:
         - name: run cover
           run: |
             printenv > .env
+            docker exec -i erlang bash -c "git config --global --add safe.directory /emqx"
             docker exec -i erlang bash -c "make cover"
             docker exec --env-file .env -i erlang bash -c "make coveralls"
         - name: cat rebar.crashdump

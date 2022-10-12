@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2020-2021 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2020-2022 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -72,5 +72,4 @@ format(Listeners) when is_list(Listeners) ->
     [ Info#{listen_on => list_to_binary(esockd:to_string(ListenOn))}
      || Info = #{listen_on := ListenOn} <- Listeners ];
 
-format({error, Reason}) -> [{error, Reason}].
-
+format({error, Reason}) -> [{error, iolist_to_binary(io_lib:format("~p", [Reason]))}].

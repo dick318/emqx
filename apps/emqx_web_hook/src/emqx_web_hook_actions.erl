@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2020-2021 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2020-2022 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -67,10 +67,12 @@
                    description => #{en => <<"Connection Pool">>,
                                     zh => <<"连接池大小"/utf8>>}
                 },
+    %% NOTE: In the new version `enable_pipelining` is changed to integer type
+    %% but it needs to be compatible with the old version, so here keep it as boolean
     enable_pipelining => #{order => 5,
                            type => boolean,
                            default => true,
-                           title => #{en => <<"Enable Pipelining">>, zh => <<"Enable Pipelining"/utf8>>},
+                           title => #{en => <<"Enable Pipelining">>, zh => <<"开启 Pipelining"/utf8>>},
                            description => #{en => <<"Whether to enable HTTP Pipelining">>,
                                             zh => <<"是否开启 HTTP Pipelining"/utf8>>}
                 },
@@ -257,30 +259,40 @@ on_action_data_to_webserver(Selected, _Envs =
                                 'BodyTokens' := BodyTokens,
                                 'Pool' := Pool,
                                 'RequestTimeout' := RequestTimeout},
-                              clientid := ClientID}) ->
-    NBody = format_msg(BodyTokens, Selected),
+                              clientid := ClientID,
+                              metadata := Metadata}) ->
+    NBody = format_msg(BodyTokens, clear_user_property_header(Selected)),
     NPath = emqx_rule_utils:proc_tmpl(PathTokens, Selected),
     Req = create_req(Method, NPath, Headers, NBody),
     case ehttpc:request({Pool, ClientID}, Method, Req, RequestTimeout) of
         {ok, StatusCode, _} when StatusCode >= 200 andalso StatusCode < 300 ->
+            ?LOG_RULE_ACTION(debug, Metadata, "HTTP Request succeeded with path: ~p status code ~p", [NPath, StatusCode]),
             emqx_rule_metrics:inc_actions_success(Id);
         {ok, StatusCode, _, _} when StatusCode >= 200 andalso StatusCode < 300 ->
             emqx_rule_metrics:inc_actions_success(Id);
         {ok, StatusCode, _} ->
-            ?LOG(warning, "HTTP request failed with path: ~p status code: ~p", [NPath, StatusCode]),
-            emqx_rule_metrics:inc_actions_error(Id);
+            ?LOG_RULE_ACTION(warning, Metadata, "HTTP request failed with path: ~p status code: ~p", [NPath, StatusCode]),
+            emqx_rule_metrics:inc_actions_error(Id),
+            {badact, StatusCode};
         {ok, StatusCode, _, _} ->
-            ?LOG(warning, "HTTP request failed with path: ~p status code: ~p", [NPath, StatusCode]),
-            emqx_rule_metrics:inc_actions_error(Id);
+            ?LOG_RULE_ACTION(warning, Metadata, "HTTP request failed with path: ~p status code: ~p", [NPath, StatusCode]),
+            emqx_rule_metrics:inc_actions_error(Id),
+            {badact, StatusCode};
         {error, Reason} ->
-            ?LOG(error, "HTTP request failed path: ~p error: ~p", [NPath, Reason]),
-            emqx_rule_metrics:inc_actions_error(Id)
+            ?LOG_RULE_ACTION(error, Metadata, "HTTP request failed path: ~p error: ~p", [NPath, Reason]),
+            emqx_rule_metrics:inc_actions_error(Id),
+            {badact, Reason}
     end.
 
 format_msg([], Data) ->
     emqx_json:encode(Data);
 format_msg(Tokens, Data) ->
-     emqx_rule_utils:proc_tmpl(Tokens, Data).
+    emqx_rule_utils:proc_tmpl(Tokens, Data).
+
+clear_user_property_header(#{headers := #{properties := #{'User-Property' := _} = P} = H} = S) ->
+    S#{headers => H#{properties => P#{'User-Property' => []}}};
+clear_user_property_header(S) ->
+    S.
 
 %%------------------------------------------------------------------------------
 %% Internal functions
@@ -365,9 +377,7 @@ get_ssl_opts(Opts, ResId) ->
 
 test_http_connect(Conf) ->
     Url = fun() -> maps:get(<<"url">>, Conf) end,
-    try
-       emqx_rule_utils:http_connectivity(Url())
-    of
+    try emqx_rule_utils:http_connectivity(Url()) of
        ok -> true;
        {error, _Reason} ->
            ?LOG(error, "check http_connectivity failed: ~p", [Url()]),

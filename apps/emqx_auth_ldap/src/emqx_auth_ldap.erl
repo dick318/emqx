@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2020-2021 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2020-2022 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -26,16 +26,11 @@
 
 -import(emqx_auth_ldap_cli, [search/3]).
 
--export([ register_metrics/0
-        , check/3
+-export([ check/3
         , description/0
         , prepare_filter/4
         , replace_vars/2
         ]).
-
--spec(register_metrics() -> ok).
-register_metrics() ->
-    lists:foreach(fun emqx_metrics:ensure/1, ?AUTH_METRICS).
 
 check(ClientInfo = #{username := Username, password := Password}, AuthResult,
       State = #{password_attr := PasswdAttr, bind_as_user := BindAsUserRequired, pool := Pool}) ->
@@ -63,12 +58,10 @@ check(ClientInfo = #{username := Username, password := Password}, AuthResult,
         end,
     case CheckResult of
         ok ->
-            ok = emqx_metrics:inc(?AUTH_METRICS(success)),
             {stop, AuthResult#{auth_result => success, anonymous => false}};
         {error, not_found} ->
-            emqx_metrics:inc(?AUTH_METRICS(ignore));
+            ok;
         {error, ResultCode} ->
-            ok = emqx_metrics:inc(?AUTH_METRICS(failure)),
             ?LOG(error, "[LDAP] Auth from ldap failed: ~p", [ResultCode]),
             {stop, AuthResult#{auth_result => ResultCode, anonymous => false}}
     end.

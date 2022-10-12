@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2020-2021 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2020-2022 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -32,5 +32,25 @@ init([Env]) ->
              restart  => permanent,
              shutdown => 5000,
              type     => worker,
-             modules  => [emqx_retainer]}]}}.
+             modules  => [emqx_retainer]} || not is_managed_by_modules()]}}.
 
+-ifdef(EMQX_ENTERPRISE).
+
+is_managed_by_modules() ->
+    try
+        case supervisor:get_childspec(emqx_modules_sup, emqx_retainer) of
+            {ok, _} -> true;
+            _ -> false
+        end
+    catch
+        exit : {noproc, _} ->
+            false
+    end.
+
+-else.
+
+is_managed_by_modules() ->
+    %% always false for opensource edition
+    false.
+
+-endif.

@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2020-2021 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2020-2022 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -29,6 +29,11 @@
 -export([ cast/2
         , call_fold/3
         ]).
+
+-export([request_meta/0]).
+
+-import(emqx_exhook_handler, [stringfy/1]).
+%% TODO: move util functions to an independent module
 
 %%--------------------------------------------------------------------
 %% Mgmt APIs
@@ -66,44 +71,59 @@ cast(Hookpoint, Req) ->
 cast(_, _, []) ->
     ok;
 cast(Hookpoint, Req, [ServerName|More]) ->
-    %% XXX: Need a real asynchronous running
+    %% TODO: Need a real asynchronous running
     _ = emqx_exhook_server:call(Hookpoint, Req,
                                 emqx_exhook_mngr:server(ServerName)),
     cast(Hookpoint, Req, More).
 
 -spec call_fold(atom(), term(), function())
   -> {ok, term()}
-   | {stop, term()}.
+   | {stop, term()}
+   | ignore.
 call_fold(Hookpoint, Req, AccFun) ->
     FailedAction = emqx_exhook_mngr:get_request_failed_action(),
     ServerNames = emqx_exhook_mngr:running(),
     case ServerNames == [] andalso FailedAction == deny of
         true ->
+            ?LOG(warning, "No available Server for hook: ~p . Stop hook chain execution with `request_failed_action=deny`.", [Hookpoint]),
             {stop, deny_action_result(Hookpoint, Req)};
         _ ->
+            %% `Req` (includede message.. etc.) as `InitAcc` for `emqx_hook`
             call_fold(Hookpoint, Req, FailedAction, AccFun, ServerNames)
     end.
 
-call_fold(_, Req, _, _, []) ->
-    {ok, Req};
-call_fold(Hookpoint, Req, FailedAction, AccFun, [ServerName|More]) ->
+-define(LOG_CALL_RESULT(ServerName, Res, Fmt),
+       ?LOG(debug, "ExHook server: ~p respond type: ~p. " ++ Fmt, [ServerName, Resp])).
+
+call_fold(_, Acc, _, _, []) ->
+    {ok, Acc};
+call_fold(Hookpoint, Acc, FailedAction, MergeAccFun, [ServerName | More]) ->
     Server = emqx_exhook_mngr:server(ServerName),
-    case emqx_exhook_server:call(Hookpoint, Req, Server) of
+    case emqx_exhook_server:call(Hookpoint, Acc, Server) of
+        ignore ->
+            %% Server is not mounted / or does not care about this hook
+            %% See emqx_exhook_server:need_call/3
+            ignore;
         {ok, Resp} ->
-            case AccFun(Req, Resp) of
-                {stop, NReq} ->
-                    {stop, NReq};
-                {ok, NReq} ->
-                    call_fold(Hookpoint, NReq, FailedAction, AccFun, More);
-                _ ->
-                    call_fold(Hookpoint, Req, FailedAction, AccFun, More)
+            case MergeAccFun(Acc, Resp) of
+                {stop, NewAcc} ->
+                    ?LOG_CALL_RESULT(ServerName, "'STOP_AND_RETURN'", "Stop hook chain execution"),
+                    {stop, NewAcc};
+                {ok, NewAccAsNReq} ->
+                    ?LOG_CALL_RESULT(ServerName, "'CONTINUE'", "Continue calling remaining ExHook servers."),
+                    call_fold(Hookpoint, NewAccAsNReq, FailedAction, MergeAccFun, More);
+                ignore ->
+                    ?LOG_CALL_RESULT(ServerName, "'IGNORE'", "Continue calling remaining ExHook servers."),
+                    call_fold(Hookpoint, Acc, FailedAction, MergeAccFun, More)
             end;
-        _ ->
+        {error, _Reason} ->
             case FailedAction of
                 deny ->
-                    {stop, deny_action_result(Hookpoint, Req)};
+                    ?LOG(error, "Call server: ~p for hook: ~p failed. Stop hook chain execution with `request_failed_action=deny`.",
+                         [ServerName, Hookpoint]),
+                    {stop, deny_action_result(Hookpoint, Acc)};
                 _ ->
-                    call_fold(Hookpoint, Req, FailedAction, AccFun, More)
+                    call_fold(Hookpoint, Acc, FailedAction, MergeAccFun, More)
             end
     end.
 
@@ -116,3 +136,10 @@ deny_action_result('message.publish', Msg) ->
     %% TODO: Not support to deny a message
     %% maybe we can put the 'allow_publish' into message header
     Msg.
+
+request_meta() ->
+    #{ node => stringfy(node())
+     , version => emqx_sys:version()
+     , sysdescr => emqx_sys:sysdescr()
+     , cluster_name => emqx_sys:cluster_name()
+     }.

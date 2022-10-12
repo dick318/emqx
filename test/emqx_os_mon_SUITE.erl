@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2019-2021 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2019-2022 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -43,14 +43,23 @@ end_per_suite(_Config) ->
     emqx_ct_helpers:stop_apps([]),
     application:stop(os_mon).
 
-% t_set_mem_check_interval(_) ->
-%     error('TODO').
+t_set_mem_check_interval(_) ->
+    emqx_os_mon:set_mem_check_interval(0),
+    ?assertEqual(60, emqx_os_mon:get_mem_check_interval()),
+    emqx_os_mon:set_mem_check_interval(61),
+    ?assertEqual(61, emqx_os_mon:get_mem_check_interval()),
+    ok.
 
-% t_set_sysmem_high_watermark(_) ->
-%     error('TODO').
-
-% t_set_procmem_high_watermark(_) ->
-%     error('TODO').
+t_set_sysmem_high_watermark(_) ->
+    emqx_os_mon:set_sysmem_high_watermark(10),
+    ?assertEqual(10, emqx_os_mon:get_sysmem_high_watermark()),
+    emqx_os_mon:set_sysmem_high_watermark(100),
+    ?assertEqual(100, emqx_os_mon:get_sysmem_high_watermark()),
+    emqx_os_mon:set_sysmem_high_watermark(90),
+    ?assertEqual(90, emqx_os_mon:get_sysmem_high_watermark()),
+    emqx_os_mon:set_sysmem_high_watermark(93.2),
+    ?assertEqual(93.2, emqx_os_mon:get_sysmem_high_watermark()),
+    ok.
 
 t_api(_) ->
     ?assertEqual(1, emqx_os_mon:get_cpu_check_interval()),

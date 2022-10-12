@@ -8,19 +8,267 @@ File format:
 
 - Use weight-2 heading for releases
 - One list item per change topic
-  Change log ends with a list of github PRs
+  Change log ends with a list of GitHub PRs
+
+## v4.3.22
+
+### Bug fixes
+
+- Fix that after receiving publish in `idle mode` the emqx-sn gateway may panic. [#9024](https://github.com/emqx/emqx/pull/9024)
+
+## v4.3.21
+
+### Bug fixes
+
+- Deny POST an existing resource id using HTTP API with error 400 "Already Exists". [#9079](https://github.com/emqx/emqx/pull/9079)
+- Fix the issue that reseting rule metrics crashed under certain conditions. [#9079](https://github.com/emqx/emqx/pull/9079)
+
+### Enhancements
+
+- TLS listener memory usage optimization [#9005](https://github.com/emqx/emqx/pull/9005).
+  New config `listener.ssl.$NAME.hibernate_after` to hibernate TLS connection process after idling.
+  Hibernation can reduce RAM usage significantly, but may cost more CPU.
+  This configuration is by default disabled.
+  Our preliminary test shows a 50% of RAM usage decline when configured to '5s'.
+
+- TLS listener default buffer size to 4KB [#9007](https://github.com/emqx/emqx/pull/9007)
+  Eliminate uncertainty that the buffer size is set by OS default.
+
+- Disable authorization for `api/v4/emqx_prometheus` endpoint. [8955](https://github.com/emqx/emqx/pull/8955)
+
+- Added a test to prevent a last will testament message to be
+  published when a client is denied connection. [#8894](https://github.com/emqx/emqx/pull/8894)
+
+- Add warning log if the acl check of a subscribed topic failed. [#9124](https://github.com/emqx/emqx/pull/9124)
+
+### Bug fixes
+
+- Fix delayed publish inaccurate caused by os time change. [#8908](https://github.com/emqx/emqx/pull/8908)
+
+- Hide redis password in error logs [#9071](https://github.com/emqx/emqx/pull/9071)
+  In this change, it also included more changes in redis client:
+  - Improve redis connection error logging [eredis:19](https://github.com/emqx/eredis/pull/19).
+    Also added support for eredis to accept an anonymous function as password instead of
+    passing around plaintext args which may get dumpped to crash logs (hard to predict where).
+    This change also added `format_status` callback for `gen_server` states which hold plaintext
+    password so the process termination log and `sys:get_status` will print '******' instead of
+    the password to console.
+  - Avoid pool name clashing [eredis_cluster#22](https://github.com/emqx/eredis_cluster/pull/22)
+    Same `format_status` callback is added here too for `gen_server`s which hold password in
+    their state.
+
+## v4.3.20
+
+### Bug fixes
+
+- Fix rule-engine update behaviour which may initialize actions for disabled rules. [#8849](https://github.com/emqx/emqx/pull/8849)
+- Fix JWT plugin don't support non-integer timestamp claims. [#8862](https://github.com/emqx/emqx/pull/8862)
+- Fix a possible dead loop caused by shared subscriptions with `shared_dispatch_ack_enabled=true`. [#8918](https://github.com/emqx/emqx/pull/8918)
+- Fix dashboard binding IP address not working. [#8916](https://github.com/emqx/emqx/pull/8916)
+- Fix rule SQL topic matching to null values failed. [#8927](https://github.com/emqx/emqx/pull/8927)
+  The following SQL should not fail (crash) but return `{"r": false}`:
+  `SELECT topic =~ 't' as r FROM "$events/client_connected"`.
+  The topic is a null value as there's no such field in event `$events/client_connected`, so it
+  should return false if match it to a topic.
+
+## v4.3.19
+
+### Enhancements
+
+- Improve error message for LwM2M plugin when object ID is not valid. [#8654](https://github.com/emqx/emqx/pull/8654).
+- Add tzdata apk package to alpine docker image. [#8671](https://github.com/emqx/emqx/pull/8671)
+- Refine Rule Engine error log. RuleId will be logged when take action failed. [#8737](https://github.com/emqx/emqx/pull/8737)
+- Increases the latency interval for MQTT Bridge test connections to improve compatibility in high-latency environments. [#8745](https://github.com/emqx/emqx/pull/8745)
+- Close ExProto client process immediately if it's keepalive timeouted. [#8725](https://github.com/emqx/emqx/pull/8725)
+- Upgrade grpc-erl driver to 0.6.7 to support batch operation in sending stream. [#8725](https://github.com/emqx/emqx/pull/8725)
+- Improved jwt authentication module initialization process. [#8736](https://github.com/emqx/emqx/pull/8736)
+
+### Bug fixes
+
+- Fix rule SQL compare to null values always returns false. [#8743](https://github.com/emqx/emqx/pull/8743)
+  Before this change, the following SQL failed to match on the WHERE clause (`clientid != foo` returns false):
+  `SELECT 'some_var' as clientid FROM "t" WHERE clientid != foo`.
+  The `foo` variable is a null value, so `clientid != foo` should be evaluated as true.
+- Fix GET `/auth_clientid` and `/auth_username` counts. [#8655](https://github.com/emqx/emqx/pull/8655)
+- Add an idle timer for ExProto UDP client to avoid client leaking [#8628](https://github.com/emqx/emqx/pull/8628)
+- Fix ExHook can't be un-hooked if the grpc service stop first. [#8725](https://github.com/emqx/emqx/pull/8725)
+- Fix the problem that ExHook cannot continue hook chains execution for mismatched topics. [#8807](https://github.com/emqx/emqx/pull/8807)
+- Fix GET `/listeners/` crashes when listener is not ready. [#8752](https://github.com/emqx/emqx/pull/8752)
+- Fix repeated warning messages in bin/emqx [#8824](https://github.com/emqx/emqx/pull/8824)
+
+
+## v4.3.18
+
+### Enhancements
+
+- Upgrade Erlang/OTP from 23.2.7.2-emqx-3 to 23.3.4.9-3 [#8511](https://github.com/emqx/emqx/pull/8511)
+- Make possible to debug-print SSL handshake procedure by setting listener config `log_level=debug` [#8553](https://github.com/emqx/emqx/pull/8553)
+- Add option to perform GC on connection process after TLS/SSL handshake is performed. [#8649](https://github.com/emqx/emqx/pull/8649)
+  Expected to reduce around 35% memory consumption for each SSL connection. See [#8637](https://github.com/emqx/emqx/pull/8637) for more details.
+
+## v4.3.17
+
+### Bug fixes
+
+- Fixed issue where the dashboard APIs were being exposed under the
+  management listener. [#8411]
+
+- Fixed crash when shared persistent subscription [#8441]
+- Fixed issue in Lua hook that prevented messages from being
+  rejected [#8535]
+- Fix ExProto UDP client keepalive checking error.
+  This causes the clients to not expire as long as a new UDP packet arrives [#8575]
+
+### Enhancements
+
+- HTTP API(GET /rules/) support for pagination and fuzzy filtering. [#8450]
+- Add check_conf cli to check config format. [#8486]
+- Optimize performance of shared subscription
+
+## v4.3.16
+
+### Enhancements
+
+- Add the possibility of configuring the password for
+  password-protected private key files used for dashboard and
+  management HTTPS listeners. [#8129]
+- Add message republish supports using placeholder variables to specify QoS and Retain values. Set `${qos}` and `${flags.retain}` use the original QoS & Retain flag.
+- Add supports specifying the network interface address of the cluster listener & rcp call listener. Specify `0.0.0.0` use all network interfaces, or a particular network interface IP address.
+- ExHook supports to customize the socket parameters for gRPC client. [#8314]
+
+### Bug fixes
+
+- Avoid repeated writing `loaded_plugins` file if the plugin enable stauts has not changed [#8179]
+- Correctly tally `connack.auth_error` metrics when a client uses MQTT
+  3.1. [#8177]
+- Do not match ACL rules containing placeholders if there's no
+  information to fill them. [#8280]
+- Fixed issue in Lua hook that didn't prevent a topic from being
+  subscribed to. [#8288]
+- Ensuring that exhook dispatches the client events are sequential. [#8311]
+- Ensure start dashboard ok event if default_username is missing.
+- Fix key update from JWKS server by JWT auth. [#8337]
+- Better errors for JWT claim validations. [#8337]
+
+## v4.3.15
+
+### Enhancements
+
+* Refactored `bin/emqx` help messages.
+* Upgrade script refuses upgrade from incompatible versions. (e.g. hot upgrade from 4.3 to 4.4 will fail fast).
+* Made possible for EMQX to boot from a Linux directory which has white spaces in its path.
+* Add support for JWT authorization [#7596]
+  Now MQTT clients may be authorized with respect to a specific claim containing publish/subscribe topic whitelists.
+* Better randomisation of app screts (changed from timestamp seeded sha hash (uuid) to crypto:strong_rand_bytes)
+* Return a client_identifier_not_valid error when username is empty and username_as_clientid is set to true [#7862]
+* Add more rule engine date functions: format_date/3, format_date/4, date_to_unix_ts/3, date_to_unix_ts/4 [#7894]
+* Add proto_name and proto_ver fields for $event/client_disconnected event.
+* Mnesia auth/acl http api support multiple condition queries.
+* Inflight QoS1 Messages for shared topics are now redispatched to other alive subscribers upon chosen subscriber session termination.
+* Make auth metrics name more understandable.
+* Allow emqx_management http listener binding to specific interface [#8005]
+* Add rule-engine function float2str/2, user can specify the float output precision [#7991]
+
+### Bug fixes
+
+* List subscription topic (/api/v4/subscriptions), the result do not match with multiple conditions.
+* SSL closed error bug fixed for redis client.
+* Fix mqtt-sn client disconnected due to re-send a duplicated qos2 message
+* Rule-engine function hexstr2bin/1 support half byte [#7977]
+* Shared message delivery when all alive shared subs have full inflight [#7984]
+* Improved resilience against autocluster partitioning during cluster
+  startup. [#7876]
+  [ekka-158](https://github.com/emqx/ekka/pull/158)
+* Add regular expression check ^[0-9A-Za-z_\-]+$ for node name [#7979]
+* Fix `node_dump` variable sourcing. [#8026]
+* Fix heap size is growing too fast when trace large message.
+* Support customized timestamp format of the log messages.
+
+## v4.3.14
+
+### Enhancements
+
+* Add `RequestMeta` for exhook.proto in order to expose `cluster_name` of emqx in each gRPC request. [#7524]
+* Support customize emqx_exhook execution priority. [#7408]
+* add api: PUT /rules/{id}/reset_metrics.
+  This api reset the metrics of the rule engine of a rule, and reset the metrics of the action related to this rule. [#7474]
+* Enhanced rule engine error handling when json parsing error.
+* Add support for `RSA-PSK-AES256-GCM-SHA384`, `RSA-PSK-AES256-CBC-SHA384`,
+ `RSA-PSK-AES128-GCM-SHA256`, `RSA-PSK-AES128-CBC-SHA256` PSK ciphers, and remove `PSK-3DES-EDE-CBC-SHA`,
+ `PSK-RC4-SHA` from the default configuration. [#7427]
+* Diagnostic logging for mnesia `wait_for_table`
+  - prints check points of mnesia internal stats
+  - prints check points of per table loading stats
+  Help to locate the problem of long table loading time.
+* Add `local` strategy for Shared Subscription.
+  That will preferentially dispatch messages to a shared subscriber at the same
+  node. It will improves the efficiency of shared messages dispatching in certain
+  scenarios, especially when the emqx-bridge-mqtt plugin is configured as shared
+  subscription. [#7462]
+* Add some compression functions to rule-engine: gzip, gunzip, zip, unzip, zip_compress, zip_uncompress
+
+### Bug fixes
+
+* Prohibit empty topics in strict mode
+* Make sure ehttpc delete useless pool always succeed.
+* Update mongodb driver to fix potential process leak.
+* Fix a potential security issue #3155 with emqx-dashboard plugin.
+  In the earlier implementation, the Dashboard password is reset back to the
+  default value of emqx_dashboard.conf after the node left cluster.
+  Now we persist changed password to protect against reset. [#7518]
+* Silence grep/sed warnings in docker-entrypoint.sh. [#7520]
+* Generate `loaded_modules` and `loaded_plugins` files with default values when no such files exists. [#7520]
+* Fix the configuration `server_name_indication` set to disable does not take effect.
+* Fix backup files are not deleted and downloaded correctly when the API path has ISO8859-1 escape characters.
 
 ## v4.3.13
+
+### Important changes
+
+* For docker image, /opt/emqx/etc has been removed from the VOLUME list,
+  this made it easier for the users to rebuild image on top with changed configs.
+* CentOS 7 Erlang runtime is rebuilt on OpenSSL-1.1.1n (previously on 1.0),
+  Prior to v4.3.13, EMQX pick certain cipher suites proposed by the clients,
+  but then fail to handshake resulting in a `malformed_handshake_data` exception.
+* CentOS 8 Erlang runtime is rebuilt on RockyLinux 8.
+  'centos8' will remain in the package name to keep it backward compatible.
 
 ### Enhancements
 
 * CLI `emqx_ctl pem_cache clean` to force purge x509 certificate cache,
   to force an immediate reload of all certificates after the files are updated on disk.
+* Refactor the ExProto so that anonymous clients can also be displayed on the dashboard [#6983]
+* Force shutdown of processes that cannot answer takeover event [#7026]
+* `topic` parameter in bridge configuration can have `${node}` substitution (just like in `clientid` parameter)
+* Add UTF-8 string validity check in `strict_mode` for MQTT packet.
+  When set to true, invalid UTF-8 strings will cause the client to be disconnected. i.e. client ID, topic name. [#7261]
+* Changed systemd service restart delay from 10 seconds to 60 seconds.
+* MQTT-SN gateway supports initiative to synchronize registered topics after session resumed. [#7300]
+* Add load control app for future development.
+* Change the precision of float to 17 digits after the decimal point when formatting a
+  float using payload templates of rule actions. The old precision is 10 digits before
+  this change. [#7336]
+* Return the cached resource status when querying a resource using HTTP APIs.
+  This is to avoid blocking the HTTP request if the resource is unavailable. [#7374]
 
 ### Bug fixes
 
+* Fix the `{error,eexist}` error when do release upgrade again if last run failed. [#7121]
 * Fix case where publishing to a non-existent topic alias would crash the connection [#6979]
 * Fix HTTP-API 500 error on querying the lwm2m client list on the another node [#7009]
+* Fix the ExProto connection registry is not released after the client process abnormally exits [#6983]
+* Fix Server-KeepAlive wrongly applied on MQTT v3.0/v3.1 [#7085]
+* Fix Stomp client can not trigger `$event/client_connection` message [#7096]
+* Fix system memory false alarm at boot
+* Fix the MQTT-SN message replay when the topic is not registered to the client [#6970]
+* Fix rpc get node info maybe crash when other nodes is not ready.
+* Fix false alert level log “cannot_find_plugins” caused by duplicate plugin names in `loaded_plugins` files.
+* Prompt user how to change the dashboard's initial default password when emqx start.
+* Fix errno=13 'Permission denied' Cannot create FIFO boot error in Amazon Linux 2022 (el8 package)
+* Fix user or appid created, name only allow `^[A-Za-z]+[A-Za-z0-9-_]*$`
+* Fix subscribe http api crash by bad_qos `/mqtt/subscribe`,`/mqtt/subscribe_batch`.
+* Send DISCONNECT packet with reason code 0x98 if connection has been kicked [#7309]
+* Auto subscribe to an empty topic will be simply ignored now
 
 ## v4.3.12
 ### Important changes

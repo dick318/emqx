@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2020-2021 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2020-2022 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -48,7 +48,9 @@ init_per_group(GrpName, Cfg) ->
     Cfg.
 
 end_per_group(_GrpName, _Cfg) ->
-    emqx_ct_helpers:stop_apps([emqx_auth_ldap]).
+    emqx_ct_helpers:stop_apps([emqx_auth_ldap]),
+    %% clear the application envs to avoid cross-suite testcase failure
+    application:unload(emqx_auth_ldap).
 
 %%--------------------------------------------------------------------
 %% Cases

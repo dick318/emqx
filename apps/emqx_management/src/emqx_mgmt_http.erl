@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2020-2021 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2020-2022 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -85,11 +85,13 @@ listeners() ->
     application:get_env(?APP, listeners, []).
 
 listener_name(Proto) ->
+    %% NOTE: this name has referenced by emqx_management.appup.src.
+    %% Please don't change it except you have got how to handle it in hot-upgrade
     list_to_atom(atom_to_list(Proto) ++ ":management").
 
 http_handlers() ->
     Plugins = lists:map(fun(Plugin) -> Plugin#plugin.name end, emqx_plugins:list()),
-    [{"/api/v4", minirest:handler(#{apps   => Plugins ++ [emqx_modules] -- ?EXCEPT_PLUGIN,
+    [{"/api/v4", minirest:handler(#{apps   => (Plugins ++ [emqx_modules]) -- ?EXCEPT_PLUGIN,
                                     except => ?EXCEPT,
                                     filter => fun ?MODULE:filter/1}),
                  [{authorization, fun ?MODULE:authorize_appid/1}]}].
@@ -118,9 +120,10 @@ handle_request(_Method, _Path, Req) ->
     cowboy_req:reply(400, #{<<"content-type">> => <<"text/plain">>}, <<"Not found.">>, Req).
 
 authorize_appid(Req) ->
-    case cowboy_req:parse_header(<<"authorization">>, Req) of
-        {basic, AppId, AppSecret} -> emqx_mgmt_auth:is_authorized(AppId, AppSecret);
-         _  -> false
+    try
+        {basic, AppId, AppSecret} = cowboy_req:parse_header(<<"authorization">>, Req),
+        emqx_mgmt_auth:is_authorized(AppId, AppSecret)
+    catch _:_ -> false
     end.
 
 -ifdef(EMQX_ENTERPRISE).

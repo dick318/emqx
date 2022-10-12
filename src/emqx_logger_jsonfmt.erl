@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2021 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2021-2022 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -36,8 +36,6 @@
 -endif.
 
 -export_type([config/0]).
-
--elvis([{elvis_style, no_nested_try_catch, #{ ignore => [emqx_logger_jsonfmt]}}]).
 
 -type config() :: #{depth       => pos_integer() | unlimited,
                     report_cb   => logger:report_cb(),

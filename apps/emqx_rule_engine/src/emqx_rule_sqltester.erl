@@ -1,4 +1,4 @@
-%% Copyright (c) 2020-2021 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2020-2022 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -19,16 +19,6 @@
 
 -export([ test/1
         ]).
-
-%% Dialyzer gives up on the generated code.
-%% probably due to stack depth, or inlines.
--dialyzer({nowarn_function, [test/1,
-                             test_rule/4,
-                             flatten/1,
-                             sql_test_action/0,
-                             fill_default_values/2,
-                             envs_examp/1
-                             ]}).
 
 -spec(test(#{}) -> {ok, map() | list()} | {error, term()}).
 test(#{<<"rawsql">> := Sql, <<"ctx">> := Context}) ->
@@ -77,7 +67,7 @@ test_rule(Sql, Select, Context, EventTopics) ->
         R
     of
         {ok, Data} -> {ok, flatten(Data)};
-        {error, nomatch} -> {error, nomatch}
+        {error, Reason} -> {error, Reason}
     after
         ok = emqx_rule_registry:remove_action_instance_params(ActInstId)
     end.

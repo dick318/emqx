@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2018-2021 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2018-2022 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -29,8 +29,6 @@
 -compile(export_all).
 -compile(nowarn_export_all).
 -endif.
-
--elvis([{elvis_style, invalid_dynamic_call, #{ignore => [emqx_connection]}}]).
 
 %% API
 -export([ start_link/3
@@ -127,12 +125,6 @@
 -define(ALARM_SOCK_OPTS_KEYS, [high_watermark, high_msgq_watermark, sndbuf, recbuf, buffer]).
 
 -dialyzer({no_match, [info/2]}).
--dialyzer({nowarn_function, [ init/4
-                            , init_state/3
-                            , run_loop/2
-                            , system_terminate/4
-                            , system_code_change/4
-                            ]}).
 
 -spec(start_link(esockd:transport(), esockd:socket(), proplists:proplist())
       -> {ok, pid()}).
@@ -288,8 +280,8 @@ run_loop(Parent, State = #state{transport = Transport,
                                 peername  = Peername,
                                 channel   = Channel}) ->
     emqx_logger:set_metadata_peername(esockd:format(Peername)),
-    emqx_misc:tune_heap_size(emqx_zone:oom_policy(
-                               emqx_channel:info(zone, Channel))),
+    _ = emqx_misc:tune_heap_size(emqx_zone:oom_policy(
+                                   emqx_channel:info(zone, Channel))),
     case activate_socket(State) of
         {ok, NState} -> hibernate(Parent, NState);
         {error, Reason} ->

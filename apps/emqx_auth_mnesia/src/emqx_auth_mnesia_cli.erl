@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2020-2021 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2020-2022 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -58,7 +58,7 @@ insert_user(User = #emqx_user{login = Login}) ->
         [_|_] -> mnesia:abort(existed)
     end.
 
--spec(add_default_user(clientid | username, tuple(), binary()) -> ok | {error, any()}).
+-spec(add_default_user(clientid | username, binary(), binary()) -> ok | {error, any()}).
 add_default_user(Type, Key, Password) ->
     Login = {Type, Key},
     case add_user(Login, Password) of

@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2020-2021 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2020-2022 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -106,9 +106,11 @@ coap_read_to_mqtt({ok, SuccessCode}, CoapPayload, Format, Ref) ->
         Result = coap_content_to_mqtt_payload(CoapPayload, Format, Ref),
         make_response(SuccessCode, Ref, Format, Result)
     catch
-        error:not_implemented -> make_response(not_implemented, Ref);
+        throw : {bad_request, Reason} ->
+            ?LOG(error, "bad_request, reason=~p, payload=~p", [Reason, CoapPayload]),
+            make_response(bad_request, Ref);
         C:R:Stack ->
-            ?LOG(error, "~p, bad payload format: ~p, stacktrace: ~p", [{C, R}, CoapPayload, Stack]),
+            ?LOG(error, "bad_request, error=~p, stacktrace=~p~npayload=~p", [{C, R}, Stack, CoapPayload]),
             make_response(bad_request, Ref)
     end.
 

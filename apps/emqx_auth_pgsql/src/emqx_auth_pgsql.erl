@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2020-2021 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2020-2022 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -21,14 +21,9 @@
 -include_lib("emqx/include/emqx.hrl").
 -include_lib("emqx/include/logger.hrl").
 
--export([ register_metrics/0
-        , check/3
+-export([ check/3
         , description/0
         ]).
-
--spec(register_metrics() -> ok).
-register_metrics() ->
-    lists:foreach(fun emqx_metrics:ensure/1, ?AUTH_METRICS).
 
 %%--------------------------------------------------------------------
 %% Auth Module Callbacks
@@ -50,15 +45,13 @@ check(ClientInfo = #{password := Password}, AuthResult,
                 end,
     case CheckPass of
         ok ->
-            emqx_metrics:inc(?AUTH_METRICS(success)),
             {stop, AuthResult#{is_superuser => is_superuser(Pool, SuperQuery, ClientInfo),
                                 anonymous => false,
                                 auth_result => success}};
         {error, not_found} ->
-            emqx_metrics:inc(?AUTH_METRICS(ignore)), ok;
+            ok;
         {error, ResultCode} ->
             ?LOG(error, "[Postgres] Auth from pgsql failed: ~p", [ResultCode]),
-            emqx_metrics:inc(?AUTH_METRICS(failure)),
             {stop, AuthResult#{auth_result => ResultCode, anonymous => false}}
     end.
 
@@ -88,4 +81,3 @@ check_pass(Password, HashType) ->
     end.
 
 description() -> "Authentication with PostgreSQL".
-

@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2020-2021 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2020-2022 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -56,7 +56,6 @@ load_auth_hook() ->
     ClientidList = application:get_env(?APP, clientid_list, []),
     UsernameList = application:get_env(?APP, username_list, []),
     ok = emqx_auth_mnesia:init(#{clientid_list => ClientidList, username_list => UsernameList}),
-    ok = emqx_auth_mnesia:register_metrics(),
     Params = #{hash_type => emqx_auth_mnesia:hash_type()},
     emqx:hook('client.authenticate', fun emqx_auth_mnesia:check/3, [Params]).
 

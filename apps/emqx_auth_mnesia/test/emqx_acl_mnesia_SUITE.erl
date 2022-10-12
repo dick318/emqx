@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2020-2021 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2020-2022 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -20,11 +20,13 @@
 -compile(export_all).
 
 -include("emqx_auth_mnesia.hrl").
+-include_lib("emqx/include/emqx.hrl").
 -include_lib("eunit/include/eunit.hrl").
 -include_lib("common_test/include/ct.hrl").
 -include_lib("snabbkaffe/include/snabbkaffe.hrl").
 
 -import(emqx_ct_http, [ request_api/3
+                      , request_api/4
                       , request_api/5
                       , get_http_data/1
                       , create_default_app/0
@@ -76,15 +78,37 @@ init_per_testcase_migration(_, Config) ->
     emqx_acl_mnesia_migrator:migrate_records(),
     Config.
 
+init_per_testcase_other(t_last_will_testament_message_check_acl, Config) ->
+    OriginalACLNoMatch = application:get_env(emqx, acl_nomatch),
+    application:set_env(emqx, acl_nomatch, deny),
+    emqx_mod_acl_internal:unload([]),
+    %% deny all for this client
+    ClientID = <<"lwt_client">>,
+    ok = emqx_acl_mnesia_db:add_acl({clientid, ClientID}, <<"#">>, pubsub, deny),
+    [ {original_acl_nomatch, OriginalACLNoMatch}
+    , {clientid, ClientID}
+    | Config];
+init_per_testcase_other(_TestCase, Config) ->
+    Config.
+
 init_per_testcase(Case, Config) ->
     PerTestInitializers = [
         fun init_per_testcase_clean/2,
         fun init_per_testcase_migration/2,
-        fun init_per_testcase_emqx_hook/2
+        fun init_per_testcase_emqx_hook/2,
+        fun init_per_testcase_other/2
     ],
     lists:foldl(fun(Init, Conf) -> Init(Case, Conf) end, Config, PerTestInitializers).
 
-end_per_testcase(_, Config) ->
+end_per_testcase(t_last_will_testament_message_check_acl, Config) ->
+    emqx:unhook('client.check_acl', fun emqx_acl_mnesia:check_acl/5),
+    case ?config(original_acl_nomatch, Config) of
+        {ok, Original} -> application:set_env(emqx, acl_nomatch, Original);
+        _ -> ok
+    end,
+    emqx_mod_acl_internal:load([]),
+    ok;
+end_per_testcase(_TestCase, Config) ->
     emqx:unhook('client.check_acl', fun emqx_acl_mnesia:check_acl/5),
     Config.
 
@@ -357,13 +381,31 @@ t_rest_api(_Config) ->
                  <<"topic">> => <<"topic/C">>,
                  <<"action">> => <<"pubsub">>,
                  <<"access">> => <<"deny">>
+                },
+               #{<<"clientid">> => <<"good_clientid1">>,
+                 <<"topic">> => <<"topic/D">>,
+                 <<"action">> => <<"pubsub">>,
+                 <<"access">> => <<"deny">>
                 }],
     {ok, _} = request_http_rest_add([], Params1),
+
     {ok, Re1} = request_http_rest_list(["clientid", "test_clientid"]),
     ?assertMatch(4, length(get_http_data(Re1))),
+    {ok, Re11} = request_http_rest_list(["clientid"], "_like_clientid=good"),
+    ?assertMatch(2, length(get_http_data(Re11))),
+    {ok, Re12} = request_http_rest_list(["clientid"], "_like_clientid=clientid"),
+    ?assertMatch(6, length(get_http_data(Re12))),
+    {ok, Re13} = request_http_rest_list(["clientid"], "_like_clientid=clientid&action=pub"),
+    ?assertMatch(3, length(get_http_data(Re13))),
+    {ok, Re14} = request_http_rest_list(["clientid"], "_like_clientid=clientid&access=deny"),
+    ?assertMatch(4, length(get_http_data(Re14))),
+    {ok, Re15} = request_http_rest_list(["clientid"], "_like_clientid=clientid&topic=topic/A"),
+    ?assertMatch(1, length(get_http_data(Re15))),
+
     {ok, _} = request_http_rest_delete(["clientid", "test_clientid", "topic", "topic/A"]),
     {ok, _} = request_http_rest_delete(["clientid", "test_clientid", "topic", "topic/B"]),
     {ok, _} = request_http_rest_delete(["clientid", "test_clientid", "topic", "topic/C"]),
+    {ok, _} = request_http_rest_delete(["clientid", "good_clientid1", "topic", "topic/D"]),
     {ok, Res1} = request_http_rest_list(["clientid"]),
     ?assertMatch([], get_http_data(Res1)),
 
@@ -381,13 +423,30 @@ t_rest_api(_Config) ->
                  <<"topic">> => <<"topic/C">>,
                  <<"action">> => <<"pubsub">>,
                  <<"access">> => <<"deny">>
+                },
+               #{<<"username">> => <<"good_username">>,
+                 <<"topic">> => <<"topic/D">>,
+                 <<"action">> => <<"pubsub">>,
+                 <<"access">> => <<"deny">>
                 }],
     {ok, _} = request_http_rest_add([], Params2),
     {ok, Re2} = request_http_rest_list(["username", "test_username"]),
     ?assertMatch(4, length(get_http_data(Re2))),
+    {ok, Re21} = request_http_rest_list(["username"], "_like_username=good"),
+    ?assertMatch(2, length(get_http_data(Re21))),
+    {ok, Re22} = request_http_rest_list(["username"], "_like_username=username"),
+    ?assertMatch(6, length(get_http_data(Re22))),
+    {ok, Re23} = request_http_rest_list(["username"], "_like_username=username&action=pub"),
+    ?assertMatch(3, length(get_http_data(Re23))),
+    {ok, Re24} = request_http_rest_list(["username"], "_like_username=username&access=deny"),
+    ?assertMatch(4, length(get_http_data(Re24))),
+    {ok, Re25} = request_http_rest_list(["username"], "_like_username=username&topic=topic/A"),
+    ?assertMatch(1, length(get_http_data(Re25))),
+
     {ok, _} = request_http_rest_delete(["username", "test_username", "topic", "topic/A"]),
     {ok, _} = request_http_rest_delete(["username", "test_username", "topic", "topic/B"]),
     {ok, _} = request_http_rest_delete(["username", "test_username", "topic", "topic/C"]),
+    {ok, _} = request_http_rest_delete(["username", "good_username", "topic", "topic/D"]),
     {ok, Res2} = request_http_rest_list(["username"]),
     ?assertMatch([], get_http_data(Res2)),
 
@@ -402,16 +461,61 @@ t_rest_api(_Config) ->
                #{<<"topic">> => <<"topic/C">>,
                  <<"action">> => <<"pubsub">>,
                  <<"access">> => <<"deny">>
-                }],
+                },
+               #{<<"topic">> => <<"topic/D">>,
+                 <<"action">> => <<"pubsub">>,
+                 <<"access">> => <<"deny">>
+                }
+        ],
     {ok, _} = request_http_rest_add([], Params3),
+
     {ok, Re3} = request_http_rest_list(["$all"]),
-    ?assertMatch(4, length(get_http_data(Re3))),
+    ?assertMatch(6, length(get_http_data(Re3))),
+    {ok, Re31} = request_http_rest_list(["$all"], "topic=topic/A"),
+    ?assertMatch(1, length(get_http_data(Re31))),
+    {ok, Re32} = request_http_rest_list(["$all"], "action=sub"),
+    ?assertMatch(3, length(get_http_data(Re32))),
+    {ok, Re33} = request_http_rest_list(["$all"], "access=deny"),
+    ?assertMatch(4, length(get_http_data(Re33))),
+    {ok, Re34} = request_http_rest_list(["$all"], "action=sub&access=deny"),
+    ?assertMatch(2, length(get_http_data(Re34))),
+
     {ok, _} = request_http_rest_delete(["$all", "topic", "topic/A"]),
     {ok, _} = request_http_rest_delete(["$all", "topic", "topic/B"]),
     {ok, _} = request_http_rest_delete(["$all", "topic", "topic/C"]),
+    {ok, _} = request_http_rest_delete(["$all", "topic", "topic/D"]),
     {ok, Res3} = request_http_rest_list(["$all"]),
     ?assertMatch([], get_http_data(Res3)).
 
+%% asserts that we check ACL for the LWT topic before publishing the
+%% LWT.
+t_last_will_testament_message_check_acl(Config) ->
+    ClientID = ?config(clientid, Config),
+    {ok, C} = emqtt:start_link([
+        {clientid, ClientID},
+        {will_topic, <<"$SYS/lwt">>},
+        {will_payload, <<"should not be published">>}
+    ]),
+    {ok, _} = emqtt:connect(C),
+    ok = emqx:subscribe(<<"$SYS/lwt">>),
+    unlink(C),
+    ok = snabbkaffe:start_trace(),
+    {true, {ok, _}} =
+        ?wait_async_action(
+        exit(C, kill),
+        #{?snk_kind := last_will_testament_publish_denied},
+        1_000
+    ),
+    ok = snabbkaffe:stop(),
+
+    receive
+        {deliver, <<"$SYS/lwt">>, #message{payload = <<"should not be published">>}} ->
+            error(lwt_should_not_be_published_to_forbidden_topic)
+    after 1_000 ->
+        ok
+    end,
+
+    ok.
 
 create_conflicting_records() ->
     Records = [
@@ -441,6 +545,9 @@ combined_conflicting_records() ->
 
 request_http_rest_list(Path) ->
     request_api(get, uri(Path), default_auth_header()).
+
+request_http_rest_list(Path, Qs) ->
+    request_api(get, uri(Path), Qs, default_auth_header()).
 
 request_http_rest_lookup(Path) ->
     request_api(get, uri(Path), default_auth_header()).

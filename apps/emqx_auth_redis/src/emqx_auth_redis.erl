@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2020-2021 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2020-2022 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -21,14 +21,9 @@
 -include_lib("emqx/include/emqx.hrl").
 -include_lib("emqx/include/logger.hrl").
 
--export([ register_metrics/0
-        , check/3
+-export([ check/3
         , description/0
         ]).
-
--spec(register_metrics() -> ok).
-register_metrics() ->
-    lists:foreach(fun emqx_metrics:ensure/1, ?AUTH_METRICS).
 
 check(ClientInfo = #{password := Password}, AuthResult,
       #{auth_cmd  := AuthCmd,
@@ -52,15 +47,13 @@ check(ClientInfo = #{password := Password}, AuthResult,
                 end,
     case CheckPass of
         ok ->
-            ok = emqx_metrics:inc(?AUTH_METRICS(success)),
             IsSuperuser = is_superuser(Pool, Type, SuperCmd, ClientInfo, Timeout),
             {stop, AuthResult#{is_superuser => IsSuperuser,
                                anonymous    => false,
                                auth_result  => success}};
         {error, not_found} ->
-            ok = emqx_metrics:inc(?AUTH_METRICS(ignore));
+            ok;
         {error, ResultCode} ->
-            ok = emqx_metrics:inc(?AUTH_METRICS(failure)),
             ?LOG(error, "[Redis] Auth from redis failed: ~p", [ResultCode]),
             {stop, AuthResult#{auth_result => ResultCode, anonymous => false}}
     end.
@@ -82,4 +75,3 @@ check_pass(Password, HashType) ->
         ok -> ok;
         {error, _Reason} -> {error, not_authorized}
     end.
-

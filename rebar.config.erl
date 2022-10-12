@@ -51,6 +51,8 @@ overrides() ->
     [ {add, [ {extra_src_dirs, [{"etc", [{recursive,true}]}]}
             , {erl_opts, [{compile_info, [{emqx_vsn, get_vsn()}]}]}
             ]}
+
+    , {add, relx, [{erl_opts, [{d, 'RLX_LOG', rlx_log}]}]}
     , {add, snabbkaffe,
        [{erl_opts, common_compile_opts()}]}
     ] ++ community_plugin_overrides().
@@ -88,7 +90,7 @@ project_app_dirs() ->
     ["apps/*", alternative_lib_dir() ++ "/*", "."].
 
 plugins(HasElixir) ->
-    [ {relup_helper,{git,"https://github.com/emqx/relup_helper", {tag, "2.0.0"}}}
+    [ {relup_helper,{git,"https://github.com/emqx/relup_helper", {tag, "2.1.0"}}}
     , {er_coap_client, {git, "https://github.com/emqx/er_coap_client", {tag, "v1.0"}}}
       %% emqx main project does not require port-compiler
       %% pin at root level for deterministic
@@ -101,7 +103,7 @@ plugins(HasElixir) ->
 
 test_plugins() ->
     [ rebar3_proper,
-      {coveralls, {git, "https://github.com/emqx/coveralls-erl", {branch, "fix-git-info"}}}
+      {coveralls, {git, "https://github.com/emqx/coveralls-erl", {tag, "v2.2.0-emqx-1"}}}
     ].
 
 test_deps() ->
@@ -223,7 +225,6 @@ overlay_vars_pkg(bin) ->
     , {platform_lib_dir, "lib"}
     , {platform_log_dir, "log"}
     , {platform_plugins_dir,  "etc/plugins"}
-    , {runner_root_dir, "$(cd $(dirname $(readlink $0 || echo $0))/..; pwd -P)"}
     , {runner_bin_dir, "$RUNNER_ROOT_DIR/bin"}
     , {runner_etc_dir, "$RUNNER_ROOT_DIR/etc"}
     , {runner_lib_dir, "$RUNNER_ROOT_DIR/lib"}
@@ -238,7 +239,6 @@ overlay_vars_pkg(pkg) ->
     , {platform_lib_dir, ""}
     , {platform_log_dir, "/var/log/emqx"}
     , {platform_plugins_dir, "/var/lib/emqx/plugins"}
-    , {runner_root_dir, "/usr/lib/emqx"}
     , {runner_bin_dir, "/usr/bin"}
     , {runner_etc_dir, "/etc/emqx"}
     , {runner_lib_dir, "$RUNNER_ROOT_DIR/lib"}
@@ -248,20 +248,10 @@ overlay_vars_pkg(pkg) ->
     ].
 
 relx_apps(ReleaseType) ->
-    [ kernel
-    , sasl
-    , crypto
-    , public_key
-    , asn1
-    , syntax_tools
-    , ssl
-    , os_mon
-    , inets
-    , compiler
-    , runtime_tools
+    relx_otp_apps() ++
+    [ redbug
     , cuttlefish
     , emqx
-    , {mnesia, load}
     , {ekka, load}
     , {emqx_plugin_libs, load}
     , observer_cli
@@ -272,9 +262,13 @@ relx_apps(ReleaseType) ->
     ++ relx_apps_per_rel(ReleaseType)
     ++ [{N, load} || N <- relx_plugin_apps(ReleaseType)].
 
+relx_otp_apps() ->
+    {ok, [Apps]} = file:consult("scripts/rel_otp_apps.eterm"),
+    true = is_list(Apps),
+    Apps.
+
 relx_apps_per_rel(cloud) ->
     [ luerl
-    , xmerl
     | [{observer, load} || is_app(observer)]
     ];
 relx_apps_per_rel(edge) ->
@@ -345,6 +339,7 @@ relx_overlay(ReleaseType) ->
     , {template, "data/emqx_vars", "releases/emqx_vars"}
     , {copy, "bin/emqx", "bin/emqx"}
     , {copy, "bin/emqx_ctl", "bin/emqx_ctl"}
+    , {copy, "bin/emqx_cluster_rescue", "bin/emqx_cluster_rescue"}
     , {copy, "bin/node_dump", "bin/node_dump"}
     , {copy, "bin/install_upgrade.escript", "bin/install_upgrade.escript"}
     , {copy, "bin/emqx", "bin/emqx-{{release_version}}"} %% for relup

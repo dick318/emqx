@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2020-2021 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2020-2022 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -50,7 +50,6 @@ stop(_State) ->
     ok.
 
 load_auth_hook(AuthQuery) ->
-    ok = emqx_auth_mysql:register_metrics(),
     SuperQuery = parse_query(application:get_env(?APP, super_query, undefined)),
     {ok, HashType} = application:get_env(?APP, password_hash),
     Params = #{auth_query  => AuthQuery,

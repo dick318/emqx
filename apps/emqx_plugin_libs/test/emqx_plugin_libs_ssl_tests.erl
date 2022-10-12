@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2021 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2021-2022 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -42,7 +42,8 @@ prop_file_or_content() ->
                         {prop_cert_file_name(), proper_types:binary()}]).
 
 prop_cert_file_name() ->
-    proper_types:oneof(["certname1", <<"certname2">>, "", <<>>, undefined]).
+    File = code:which(?MODULE), %% existing
+    proper_types:oneof(["", <<>>, undefined, File]).
 
 prop_tls_versions() ->
     proper_types:oneof(["tlsv1.3",
@@ -76,3 +77,10 @@ file_or_content({Name, Content}) ->
     #{<<"file">> => Content, <<"filename">> => Name};
 file_or_content(Name) ->
     Name.
+
+bad_cert_file_test() ->
+    Input = #{<<"keyfile">> =>
+                #{<<"filename">> => "notafile",
+                  <<"file">> => ""}},
+    ?assertThrow({bad_cert_file, _},
+                 emqx_plugin_libs_ssl:save_files_return_opts(Input, "test-data")).

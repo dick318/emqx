@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2017-2021 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2017-2022 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -180,7 +180,8 @@ do_unsubscribe(Topic, SubPid, SubOpts) ->
     true = ets:delete(?SUBOPTION, {SubPid, Topic}),
     true = ets:delete_object(?SUBSCRIPTION, {SubPid, Topic}),
     Group = maps:get(share, SubOpts, undefined),
-    do_unsubscribe(Group, Topic, SubPid, SubOpts).
+    do_unsubscribe(Group, Topic, SubPid, SubOpts),
+    emqx_exclusive_subscription:unsubscribe(Topic, SubOpts).
 
 do_unsubscribe(undefined, Topic, SubPid, SubOpts) ->
     case maps:get(shard, SubOpts, 0) of
@@ -498,4 +499,3 @@ code_change(_OldVsn, State, _Extra) ->
 %%--------------------------------------------------------------------
 %% Internal functions
 %%--------------------------------------------------------------------
-

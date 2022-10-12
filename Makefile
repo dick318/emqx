@@ -5,14 +5,15 @@ BUILD = $(CURDIR)/build
 SCRIPTS = $(CURDIR)/scripts
 export EMQX_RELUP ?= true
 export EMQX_EXTRA_PLUGINS = emqx_plugin_kafka
-export EMQX_DEFAULT_BUILDER = emqx/build-env:erl23.2.7.2-emqx-3-alpine
+export EMQX_DEFAULT_BUILDER = emqx/build-env:erl23.3.4.9-3-alpine
 export EMQX_DEFAULT_RUNNER = alpine:3.12
 export PKG_VSN ?= $(shell $(CURDIR)/pkg-vsn.sh)
-export EMQX_DESC ?= EMQ X
-export EMQX_CE_DASHBOARD_VERSION ?= v4.3.5
 export DOCKERFILE := deploy/docker/Dockerfile
 ifeq ($(OS),Windows_NT)
 	export REBAR_COLOR=none
+	FIND=/usr/bin/find
+else
+	FIND=find
 endif
 
 PROFILE ?= emqx
@@ -90,15 +91,16 @@ $(REL_PROFILES:%=%): $(REBAR) get-dashboard
 clean: $(PROFILES:%=clean-%)
 $(PROFILES:%=clean-%):
 	@if [ -d _build/$(@:clean-%=%) ]; then \
-		rm rebar.lock \
+		rm -f rebar.lock; \
 		rm -rf _build/$(@:clean-%=%)/rel; \
-		find _build/$(@:clean-%=%) -name '*.beam' -o -name '*.so' -o -name '*.app' -o -name '*.appup' -o -name '*.o' -o -name '*.d' -type f | xargs rm -f; \
-		find _build/$(@:clean-%=%) -type l -delete; \
+		$(FIND) _build/$(@:clean-%=%) -name '*.beam' -o -name '*.so' -o -name '*.app' -o -name '*.appup' -o -name '*.o' -o -name '*.d' -type f | xargs rm -f; \
+		$(FIND) _build/$(@:clean-%=%) -type l -delete; \
 	fi
 
 .PHONY: clean-all
 clean-all:
 	@rm -rf _build
+	@rm -f rebar.lock
 
 .PHONY: deps-all
 deps-all: $(REBAR) $(PROFILES:%=deps-%)
@@ -113,8 +115,9 @@ $(PROFILES:%=deps-%): $(REBAR) get-dashboard
 	@rm -f rebar.lock
 
 .PHONY: xref
-xref: $(REBAR)
+xref: $(REBAR) $(REL_PROFILES:%=%-rel)
 	@$(REBAR) as check xref
+	@scripts/xref-check.escript
 
 .PHONY: dialyzer
 dialyzer: $(REBAR)

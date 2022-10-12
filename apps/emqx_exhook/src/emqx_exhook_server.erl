@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2020-2021 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2020-2022 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -25,7 +25,7 @@
 -define(PB_CLIENT_MOD, emqx_exhook_v_1_hook_provider_client).
 
 %% Load/Unload
--export([ load/3
+-export([ load/4
         , unload/1
         ]).
 
@@ -46,7 +46,7 @@
           channel :: pid(),
           %% Registered hook names and options
           hookspec :: #{hookpoint() => map()},
-          %% Metrcis name prefix
+          %% Metrics name prefix
           prefix :: list()
        }).
 
@@ -75,14 +75,13 @@
 
 -export_type([server/0]).
 
--dialyzer({nowarn_function, [inc_metrics/2]}).
-
 %%--------------------------------------------------------------------
 %% Load/Unload APIs
 %%--------------------------------------------------------------------
 
--spec load(atom(), list(), map()) -> {ok, server()} | {error, term()} .
-load(Name0, Opts0, ReqOpts) ->
+-spec load(atom(), emqx_exhook_mngr:server_options(), grpc_client:options(), emqx_exhook_mngr:hooks_options())
+          -> {ok, server()} | {error, term()} .
+load(Name0, Opts0, ReqOpts, HooksOpts) ->
     Name = to_list(Name0),
     {SvrAddr, ClientOpts} = channel_opts(Opts0),
     case emqx_exhook_sup:start_grpc_client_channel(
@@ -97,7 +96,7 @@ load(Name0, Opts0, ReqOpts) ->
                                io_lib:format("exhook.~s.", [Name])),
                     ensure_metrics(Prefix, HookSpecs),
                     %% Ensure hooks
-                    ensure_hooks(HookSpecs),
+                    ensure_hooks(HookSpecs, maps:get(hook_priority, HooksOpts, ?DEFAULT_HOOK_PRIORITY)),
                     {ok, #server{name = Name,
                                  options = ReqOpts,
                                  channel = _ChannPoolPid,
@@ -123,13 +122,16 @@ channel_opts(Opts) ->
     Host = proplists:get_value(host, Opts),
     Port = proplists:get_value(port, Opts),
     SvrAddr = format_http_uri(Scheme, Host, Port),
+    SockOpts = proplists:get_value(socket_options, Opts),
     ClientOpts = case Scheme of
                      https ->
                          SslOpts = lists:keydelete(ssl, 1, proplists:get_value(ssl_options, Opts, [])),
                          #{gun_opts =>
                            #{transport => ssl,
-                             transport_opts => SslOpts}};
-                     _ -> #{}
+                             transport_opts => SockOpts ++ SslOpts}};
+                     _ ->
+                         #{gun_opts =>
+                           #{transport_opts => SockOpts}}
                  end,
     {SvrAddr, ClientOpts}.
 
@@ -142,13 +144,15 @@ format_http_uri(Scheme, Host0, Port) ->
 
 -spec unload(server()) -> ok.
 unload(#server{name = Name, options = ReqOpts, hookspec = HookSpecs}) ->
-    _ = do_deinit(Name, ReqOpts),
     _ = may_unload_hooks(HookSpecs),
+    _ = do_deinit(Name, ReqOpts),
     _ = emqx_exhook_sup:stop_grpc_client_channel(Name),
     ok.
 
 do_deinit(Name, ReqOpts) ->
-    _ = do_call(Name, 'on_provider_unloaded', #{}, ReqOpts),
+    %% Using shorter timeout to deinit grpc server to avoid emqx_exhook_mngr
+    %% force killed by upper supervisor
+    _ = do_call(Name, 'on_provider_unloaded', #{}, ReqOpts#{timeout => 3000}),
     ok.
 
 do_init(ChannName, ReqOpts) ->
@@ -174,7 +178,7 @@ resovle_hookspec(HookSpecs) when is_list(HookSpecs) ->
         case maps:get(name, HookSpec, undefined) of
             undefined -> Acc;
             Name0 ->
-                Name = try binary_to_existing_atom(Name0, utf8) catch T:R:_ -> {T,R} end,
+                Name = try binary_to_existing_atom(Name0, utf8) catch T:R -> {T,R} end,
                 case lists:member(Name, AvailableHooks) of
                     true ->
                         case lists:member(Name, MessageHooks) of
@@ -193,13 +197,13 @@ ensure_metrics(Prefix, HookSpecs) ->
             || Hookpoint <- maps:keys(HookSpecs)],
     lists:foreach(fun emqx_metrics:ensure/1, Keys).
 
-ensure_hooks(HookSpecs) ->
+ensure_hooks(HookSpecs, Priority) ->
     lists:foreach(fun(Hookpoint) ->
         case lists:keyfind(Hookpoint, 1, ?ENABLED_HOOKS) of
             false ->
                 ?LOG(error, "Unknown name ~s to hook, skip it!", [Hookpoint]);
             {Hookpoint, {M, F, A}} ->
-                emqx_hooks:put(Hookpoint, {M, F, A}),
+                emqx_hooks:put(Hookpoint, {M, F, A}, Priority),
                 ets:update_counter(?CNTER, Hookpoint, {2, 1}, {Hookpoint, 0})
         end
     end, maps:keys(HookSpecs)).
@@ -234,31 +238,31 @@ name(#server{name = Name}) ->
    | {error, term()}.
 call(Hookpoint, Req, #server{name = ChannName, options = ReqOpts,
                              hookspec = Hooks, prefix = Prefix}) ->
-    GrpcFunc = hk2func(Hookpoint),
-    case maps:get(Hookpoint, Hooks, undefined) of
-        undefined -> ignore;
-        Opts ->
-            NeedCall  = case lists:member(Hookpoint, message_hooks()) of
-                            false -> true;
-                            _ ->
-                                #{message := #{topic := Topic}} = Req,
-                                match_topic_filter(Topic, maps:get(topics, Opts, []))
-                        end,
-            case NeedCall of
-                false -> ignore;
-                _ ->
-                    inc_metrics(Prefix, Hookpoint),
-                    do_call(ChannName, GrpcFunc, Req, ReqOpts)
-            end
+    case need_call(Hookpoint, Req, Hooks) of
+        true ->
+            inc_metrics(Prefix, Hookpoint),
+            do_call(ChannName, hk2func(Hookpoint), Req, ReqOpts);
+        false ->
+            ignore
     end.
 
 %% @private
-inc_metrics(IncFun, Name) when is_function(IncFun) ->
-    %% BACKW: e4.2.0-e4.2.2
-    {env, [Prefix|_]} = erlang:fun_info(IncFun, env),
-    inc_metrics(Prefix, Name);
 inc_metrics(Prefix, Name) when is_list(Prefix) ->
     emqx_metrics:inc(list_to_atom(Prefix ++ atom_to_list(Name))).
+
+need_call(Hookpoint, Req, Hooks) ->
+    case maps:get(Hookpoint, Hooks, undefined) of
+        undefined ->
+            false; %% Hookpoint is not mounted on this server
+        Opts ->
+            case lists:member(Hookpoint, message_hooks()) of
+                false ->
+                    true;
+                _ ->
+                    #{message := #{topic := Topic}} = Req,
+                    match_topic_filter(Topic, maps:get(topics, Opts, []))
+            end
+    end.
 
 -compile({inline, [match_topic_filter/2]}).
 match_topic_filter(_, []) ->
@@ -268,23 +272,24 @@ match_topic_filter(TopicName, TopicFilter) ->
 
 -spec do_call(string(), atom(), map(), map()) -> {ok, map()} | {error, term()}.
 do_call(ChannName, Fun, Req, ReqOpts) ->
-    Options = ReqOpts#{channel => ChannName},
-    ?LOG(debug, "Call ~0p:~0p(~0p, ~0p)", [?PB_CLIENT_MOD, Fun, Req, Options]),
-    case catch apply(?PB_CLIENT_MOD, Fun, [Req, Options]) of
+    NReq = Req#{meta => emqx_exhook:request_meta()},
+    Options = ReqOpts#{channel => ChannName, key_dispatch => key_dispatch(NReq)},
+    ?LOG(debug, "Call ~0p:~0p(~0p, ~0p)", [?PB_CLIENT_MOD, Fun, NReq, Options]),
+    case catch apply(?PB_CLIENT_MOD, Fun, [NReq, Options]) of
         {ok, Resp, _Metadata} ->
             ?LOG(debug, "Response {ok, ~0p, ~0p}", [Resp, _Metadata]),
             {ok, Resp};
         {error, {Code, Msg}, _Metadata} ->
             ?LOG(error, "CALL ~0p:~0p(~0p, ~0p) response errcode: ~0p, errmsg: ~0p",
-                        [?PB_CLIENT_MOD, Fun, Req, Options, Code, Msg]),
+                        [?PB_CLIENT_MOD, Fun, NReq, Options, Code, Msg]),
             {error, {Code, Msg}};
         {error, Reason} ->
             ?LOG(error, "CALL ~0p:~0p(~0p, ~0p) error: ~0p",
-                        [?PB_CLIENT_MOD, Fun, Req, Options, Reason]),
+                        [?PB_CLIENT_MOD, Fun, NReq, Options, Reason]),
             {error, Reason};
         {'EXIT', {Reason, Stk}} ->
             ?LOG(error, "CALL ~0p:~0p(~0p, ~0p) throw an exception: ~0p, stacktrace: ~0p",
-                        [?PB_CLIENT_MOD, Fun, Req, Options, Reason, Stk]),
+                        [?PB_CLIENT_MOD, Fun, NReq, Options, Reason, Stk]),
             {error, Reason}
     end.
 
@@ -326,3 +331,13 @@ available_hooks() ->
      'session.created', 'session.subscribed', 'session.unsubscribed',
      'session.resumed', 'session.discarded', 'session.takeovered',
      'session.terminated' | message_hooks()].
+
+%% @doc Get dispatch_key for each request
+key_dispatch(_Req = #{clientinfo := #{clientid := ClientId}}) ->
+    ClientId;
+key_dispatch(_Req = #{conninfo := #{clientid := ClientId}}) ->
+    ClientId;
+key_dispatch(_Req = #{message := #{from := From}}) ->
+    From;
+key_dispatch(_Req) ->
+    self().

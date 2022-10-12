@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2020-2021 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2020-2022 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -90,14 +90,6 @@
 -define(SOCK_STATS, [recv_oct, recv_cnt, send_oct, send_cnt, send_pend]).
 
 -define(ENABLED(X), (X =/= undefined)).
-
--dialyzer({nowarn_function,
-           [ system_terminate/4
-           , handle_call/3
-           , handle_msg/2
-           , shutdown/3
-           , stop/3
-           ]}).
 
 %% udp
 start_link(Socket = {udp, _SockPid, _Sock}, Peername, Options) ->
@@ -211,15 +203,34 @@ esockd_setopts({esockd_transport, Socket}, Opts) ->
     %% FIXME: DTLS works??
     esockd_transport:setopts(Socket, Opts).
 
-esockd_getstat({udp, _SockPid, Sock}, Stats) ->
-    inet:getstat(Sock, Stats);
 esockd_getstat({esockd_transport, Sock}, Stats) ->
-    esockd_transport:getstat(Sock, Stats).
+    esockd_transport:getstat(Sock, Stats);
+esockd_getstat({udp, _SockPid, _Sock}, Stats) ->
+    {ok, lists:map(fun(K) -> {K, get_stats(K)} end, Stats)}.
 
-send(Data, #state{socket = {udp, _SockPid, Sock}, peername = {Ip, Port}}) ->
+send(Data, State = #state{socket = {udp, _SockPid, Sock}, peername = {Ip, Port}}) ->
+    incr_send_stats(Data, State),
     gen_udp:send(Sock, Ip, Port, Data);
 send(Data, #state{socket = {esockd_transport, Sock}}) ->
     esockd_transport:async_send(Sock, Data).
+
+incr_recv_stats(Data, #state{socket = {udp, _, _}}) ->
+    incr_stats(recv_oct, byte_size(Data)),
+    incr_stats(recv_cnt, 1).
+
+incr_send_stats(Data, #state{socket = {udp, _, _}}) ->
+    incr_stats(send_oct, byte_size(Data)),
+    incr_stats(send_cnt, 1).
+
+incr_stats(Key, Cnt) ->
+    Cnt0 = get_stats(Key),
+    put({stats, Key}, Cnt0 + Cnt).
+
+get_stats(Key) ->
+    case get({stats, Key}) of
+        undefined -> 0;
+        Cnt -> Cnt
+    end.
 
 %%--------------------------------------------------------------------
 %% callbacks
@@ -386,6 +397,7 @@ handle_msg({'$gen_cast', Req}, State) ->
     with_channel(handle_cast, [Req], State);
 
 handle_msg({datagram, _SockPid, Data}, State) ->
+    incr_recv_stats(Data, State),
     process_incoming(Data, State);
 
 handle_msg({Inet, _Sock, Data}, State) when Inet == tcp; Inet == ssl ->
@@ -439,7 +451,8 @@ handle_msg({close, Reason}, State) ->
     ?LOG(debug, "Force to close the socket due to ~p", [Reason]),
     handle_info({sock_closed, Reason}, close_socket(State));
 
-handle_msg({event, connected}, State = #state{channel = Channel}) ->
+handle_msg({event, Event}, State = #state{channel = Channel})
+  when Event == connected; Event == accepted ->
     ClientId = emqx_exproto_channel:info(clientid, Channel),
     emqx_cm:insert_channel_info(ClientId, info(State), stats(State));
 
@@ -449,11 +462,11 @@ handle_msg({event, disconnected}, State = #state{channel = Channel}) ->
     emqx_cm:connection_closed(ClientId),
     {ok, State};
 
-%handle_msg({event, _Other}, State = #state{channel = Channel}) ->
-%    ClientId = emqx_exproto_channel:info(clientid, Channel),
-%    emqx_cm:set_chan_info(ClientId, info(State)),
-%    emqx_cm:set_chan_stats(ClientId, stats(State)),
-%    {ok, State};
+handle_msg({event, _Other}, State = #state{channel = Channel}) ->
+    ClientId = emqx_exproto_channel:info(clientid, Channel),
+    emqx_cm:set_chan_info(ClientId, info(State)),
+    emqx_cm:set_chan_stats(ClientId, stats(State)),
+    {ok, State};
 
 handle_msg({timeout, TRef, TMsg}, State) ->
     handle_timeout(TRef, TMsg, State);
@@ -480,6 +493,7 @@ terminate(Reason, State = #state{channel = Channel}) ->
 system_continue(Parent, _Debug, State) ->
     recvloop(Parent, State).
 
+-spec system_terminate(atom(), term(), term(), state()) -> no_return().
 system_terminate(Reason, _Parent, _Debug, State) ->
     terminate(Reason, State).
 

@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2020-2021 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2020-2022 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -68,7 +68,7 @@ add_app(_Bindings, Params) ->
     end.
 
 del_app(#{appid := AppId}, _Params) ->
-    case emqx_mgmt_auth:del_app(AppId) of
+    case emqx_mgmt_auth:del_app(emqx_mgmt_util:urldecode(AppId)) of
         ok -> minirest:return();
         {error, Reason} -> minirest:return({error, Reason})
     end.
@@ -77,7 +77,7 @@ list_apps(_Bindings, _Params) ->
     minirest:return({ok, [format(Apps)|| Apps <- emqx_mgmt_auth:list_apps()]}).
 
 lookup_app(#{appid := AppId}, _Params) ->
-    case emqx_mgmt_auth:lookup_app(AppId) of
+    case emqx_mgmt_auth:lookup_app(emqx_mgmt_util:urldecode(AppId)) of
         {AppId, AppSecret, Name, Desc, Status, Expired} ->
             minirest:return({ok, #{app_id => AppId,
                           secret => AppSecret,
@@ -94,7 +94,7 @@ update_app(#{appid := AppId}, Params) ->
     Desc = proplists:get_value(<<"desc">>, Params),
     Status = proplists:get_value(<<"status">>, Params),
     Expired = proplists:get_value(<<"expired">>, Params),
-    case emqx_mgmt_auth:update_app(AppId, Name, Desc, Status, Expired) of
+    case emqx_mgmt_auth:update_app(emqx_mgmt_util:urldecode(AppId), Name, Desc, Status, Expired) of
         ok -> minirest:return();
         {error, Reason} -> minirest:return({error, Reason})
     end.

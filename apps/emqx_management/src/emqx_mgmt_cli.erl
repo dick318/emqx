@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2020-2021 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2020-2022 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -580,7 +580,7 @@ acl(["cache-clean", "node", Node]) ->
     with_log(fun() -> for_node(fun emqx_mgmt:clean_acl_cache_all/1, Node) end,
              "ACL cache drain start");
 acl(["cache-clean", "all"]) ->
-    with_log(fun emqx_mgmt:clean_acl_cache_all/1,
+    with_log(fun emqx_mgmt:clean_acl_cache_all/0,
              "ACL cache drain start");
 acl(["cache-clean", ClientId]) ->
     emqx_mgmt:clean_acl_cache(ClientId);

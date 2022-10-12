@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2020-2021 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2020-2022 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -27,7 +27,6 @@
 -define(TABLE, emqx_user).
 %% Auth callbacks
 -export([ init/1
-        , register_metrics/0
         , check/3
         , description/0
         ]).
@@ -51,10 +50,6 @@ init(#{clientid_list := ClientidList, username_list := UsernameList}) ->
 
     ok = ekka_mnesia:copy_table(?TABLE, disc_copies).
 
--spec(register_metrics() -> ok).
-register_metrics() ->
-    lists:foreach(fun emqx_metrics:ensure/1, ?AUTH_METRICS).
-
 hash_type() ->
     application:get_env(emqx_auth_mnesia, password_hash, sha256).
 
@@ -67,16 +62,14 @@ check(ClientInfo = #{ clientid := Clientid
                            end),
     case ets:select(?TABLE, MatchSpec) of
         [] ->
-            emqx_metrics:inc(?AUTH_METRICS(ignore)),
             ok;
         List ->
             case match_password(NPassword, HashType, List)  of
                 false ->
-                    ?LOG(error, "[Mnesia] Auth from mnesia failed: ~p", [ClientInfo]),
-                    emqx_metrics:inc(?AUTH_METRICS(failure)),
+                    Info = maps:without([password], ClientInfo),
+                    ?LOG(info, "[Mnesia] Auth from mnesia failed: ~p", [Info]),
                     {stop, AuthResult#{anonymous => false, auth_result => password_error}};
                 _ ->
-                    emqx_metrics:inc(?AUTH_METRICS(success)),
                     {stop, AuthResult#{anonymous => false, auth_result => success}}
             end
     end.

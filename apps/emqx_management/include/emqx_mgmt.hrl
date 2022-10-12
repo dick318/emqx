@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2020-2021 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2020-2022 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -31,5 +31,6 @@
 -define(ERROR13, 113). %% User already exist
 -define(ERROR14, 114). %% OldPassword error
 -define(ERROR15, 115). %% bad topic
+-define(ERROR16, 116). %% bad QoS
 
 -define(VERSIONS, ["4.0", "4.1", "4.2", "4.3"]).

@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2020-2021 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2020-2022 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -51,6 +51,10 @@
 
 -define(PORT, 9000).
 -define(NAME, ?MODULE).
+-define(DEFAULT_CLUSTER_NAME, <<"emqxcl">>).
+-define(OTHER_CLUSTER_NAME_BIN, <<"test_emqx_cluster">>).
+-define(TEST_PUBLISH_FILTERS_BIN, <<"test_message_filters">>).
+-define(AFTER_HARDCODED_PAYLOAD, <<"after_hardcoded">>).
 
 %%--------------------------------------------------------------------
 %% Server APIs
@@ -112,30 +116,42 @@ reply(Q1, Q2) ->
 -spec on_provider_loaded(emqx_exhook_pb:provider_loaded_request(), grpc:metadata())
     -> {ok, emqx_exhook_pb:loaded_response(), grpc:metadata()}
      | {error, grpc_cowboy_h:error_response()}.
-
-on_provider_loaded(Req, Md) ->
+on_provider_loaded(#{meta := #{cluster_name := Name}} = Req, Md) ->
     ?MODULE:in({?FUNCTION_NAME, Req}),
     %io:format("fun: ~p, req: ~0p~n", [?FUNCTION_NAME, Req]),
-    {ok, #{hooks => [
-                     #{name => <<"client.connect">>},
-                     #{name => <<"client.connack">>},
-                     #{name => <<"client.connected">>},
-                     #{name => <<"client.disconnected">>},
-                     #{name => <<"client.authenticate">>},
-                     #{name => <<"client.check_acl">>},
-                     #{name => <<"client.subscribe">>},
-                     #{name => <<"client.unsubscribe">>},
-                     #{name => <<"session.created">>},
-                     #{name => <<"session.subscribed">>},
-                     #{name => <<"session.unsubscribed">>},
-                     #{name => <<"session.resumed">>},
-                     #{name => <<"session.discarded">>},
-                     #{name => <<"session.takeovered">>},
-                     #{name => <<"session.terminated">>},
-                     #{name => <<"message.publish">>},
-                     #{name => <<"message.delivered">>},
-                     #{name => <<"message.acked">>},
-                     #{name => <<"message.dropped">>}]}, Md}.
+    HooksClient =
+        [#{name => <<"client.connect">>},
+         #{name => <<"client.connack">>},
+         #{name => <<"client.connected">>},
+         #{name => <<"client.disconnected">>},
+         #{name => <<"client.authenticate">>},
+         #{name => <<"client.check_acl">>},
+         #{name => <<"client.subscribe">>},
+         #{name => <<"client.unsubscribe">>}],
+    HooksSession =
+        [#{name => <<"session.created">>},
+         #{name => <<"session.subscribed">>},
+         #{name => <<"session.unsubscribed">>},
+         #{name => <<"session.resumed">>},
+         #{name => <<"session.discarded">>},
+         #{name => <<"session.takeovered">>},
+         #{name => <<"session.terminated">>}],
+    PublishWithFilter =
+        [#{name => <<"message.publish">>, topics => [<<"t/1">>, <<"a/#">>, <<"b/+">>]}],
+    PublishWithOutFilter =
+        [#{name => <<"message.publish">>}],
+    HooksMessage =
+        [#{name => <<"message.delivered">>},
+         #{name => <<"message.acked">>},
+         #{name => <<"message.dropped">>}],
+    case Name of
+        ?DEFAULT_CLUSTER_NAME ->
+            {ok, #{hooks => HooksClient ++ HooksSession ++ PublishWithOutFilter ++ HooksMessage}, Md};
+        ?OTHER_CLUSTER_NAME_BIN ->
+            {ok, #{hooks => HooksClient}, Md};
+        ?TEST_PUBLISH_FILTERS_BIN ->
+            {ok, #{hooks => HooksClient ++ HooksSession ++ PublishWithFilter ++ HooksMessage}, Md}
+    end.
 -spec on_provider_unloaded(emqx_exhook_pb:provider_unloaded_request(), grpc:metadata())
     -> {ok, emqx_exhook_pb:empty_success(), grpc:metadata()}
      | {error, grpc_cowboy_h:error_response()}.
@@ -308,6 +324,12 @@ on_message_publish(#{message := #{from := From} = Msg} = Req, Md) ->
         <<"gooduser">> ->
             NMsg = Msg#{topic => From,
                         payload => From},
+            {ok, #{type => 'STOP_AND_RETURN',
+                   value => {message, NMsg}}, Md};
+        <<"test_filter_client">> ->
+            %% rewrite topic and payload
+            NMsg = Msg#{topic => <<"exhook/hardcoded">>,
+                        payload => ?AFTER_HARDCODED_PAYLOAD},
             {ok, #{type => 'STOP_AND_RETURN',
                    value => {message, NMsg}}, Md};
         _ ->

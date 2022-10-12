@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2018-2021 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2018-2022 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -276,6 +276,58 @@ t_stats_fun(Config) when is_list(Config) ->
 t_stats_fun({'end', _Config}) ->
     ok = emqx_broker:unsubscribe(<<"topic">>),
     ok = emqx_broker:unsubscribe(<<"topic2">>).
+
+t_connack_auth_error({init, Config}) ->
+    process_flag(trap_exit, true),
+    emqx_ct_helpers:stop_apps([]),
+    emqx_ct_helpers:boot_modules(all),
+    Handler =
+        fun(emqx) ->
+                application:set_env(emqx, acl_nomatch, deny),
+                application:set_env(emqx, allow_anonymous, false),
+                application:set_env(emqx, enable_acl_cache, false),
+                ok;
+           (_) ->
+                ok
+        end,
+    emqx_ct_helpers:start_apps([], Handler),
+    Config;
+t_connack_auth_error({'end', _Config}) ->
+    emqx_ct_helpers:stop_apps([]),
+    emqx_ct_helpers:boot_modules(all),
+    emqx_ct_helpers:start_apps([]),
+    ok;
+t_connack_auth_error(Config) when is_list(Config) ->
+    %% MQTT 3.1
+    ?assertEqual(0, emqx_metrics:val('packets.connack.auth_error')),
+    {ok, C0} = emqtt:start_link([{proto_ver, v4}]),
+    ?assertEqual({error, {unauthorized_client, undefined}}, emqtt:connect(C0)),
+    ?assertEqual(1, emqx_metrics:val('packets.connack.auth_error')),
+    %% MQTT 5.0
+    {ok, C1} = emqtt:start_link([{proto_ver, v5}]),
+    ?assertEqual({error, {not_authorized, #{}}}, emqtt:connect(C1)),
+    ?assertEqual(2, emqx_metrics:val('packets.connack.auth_error')),
+    ok.
+
+t_handle_in_empty_client_subscribe_hook({init, Config}) ->
+    Config;
+t_handle_in_empty_client_subscribe_hook({'end', _Config}) ->
+    ok;
+t_handle_in_empty_client_subscribe_hook(Config) when is_list(Config) ->
+    Hook = fun(_ClientInfo, _Username, TopicFilter) ->
+                   EmptyFilters = [{T, Opts#{deny_subscription => true}} || {T, Opts} <- TopicFilter],
+                   {stop, EmptyFilters}
+           end,
+    ok = emqx:hook('client.subscribe', Hook, []),
+    try
+        {ok, C} = emqtt:start_link(),
+        {ok, _} = emqtt:connect(C),
+        {ok, _, RCs} = emqtt:subscribe(C, <<"t">>),
+        ?assertEqual([?RC_UNSPECIFIED_ERROR], RCs),
+        ok
+    after
+        ok = emqx:unhook('client.subscribe', Hook)
+    end.
 
 recv_msgs(Count) ->
     recv_msgs(Count, []).

@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2020-2021 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2020-2022 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -69,12 +69,9 @@ find_name(Name) ->
                  end,
     case ets:lookup(?LWM2M_OBJECT_NAME_TO_ID_TAB, NameBinary) of
         [] ->
-            undefined;
+            {error, no_xml_definition};
         [{NameBinary, ObjectId}] ->
-            case ets:lookup(?LWM2M_OBJECT_DEF_TAB, ObjectId) of
-                [] -> undefined;
-                [{ObjectId, Xml}] -> Xml
-            end
+            find_objectid(ObjectId)
     end.
 
 stop() ->

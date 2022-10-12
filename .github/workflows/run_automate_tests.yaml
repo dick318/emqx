@@ -19,7 +19,7 @@ jobs:
       id: dload_jmeter
       timeout-minutes: 1
       env:
-        JMETER_VERSION: 5.3
+        JMETER_VERSION: 5.4.3
       run: |
         wget --no-verbose --no-check-certificate -O /tmp/apache-jmeter.tgz https://downloads.apache.org/jmeter/binaries/apache-jmeter-$JMETER_VERSION.tgz
     - uses: actions/upload-artifact@v2
@@ -27,13 +27,15 @@ jobs:
         name: apache-jmeter.tgz
         path: /tmp/apache-jmeter.tgz
     - uses: actions/checkout@v2
+    - uses: erlef/setup-beam@v1
+      with:
+        otp-version: "23.3.4.13"
     - name: build docker
       id: build_docker
       run: |
         if [ -f EMQX_ENTERPRISE ]; then
           echo "https://ci%40emqx.io:${{ secrets.CI_GIT_TOKEN }}@github.com" > $HOME/.git-credentials
           git config --global credential.helper store
-          echo "${{ secrets.CI_GIT_TOKEN }}" >> scripts/git-token
           make deps-emqx-ee
           make clean
           make emqx-ee-docker
@@ -118,7 +120,7 @@ jobs:
     - name: install jmeter
       timeout-minutes: 10
       env:
-          JMETER_VERSION: 5.3
+          JMETER_VERSION: 5.4.3
       run: |
         cd /tmp && tar -xvf apache-jmeter.tgz
         echo "jmeter.save.saveservice.output_format=xml" >> /tmp/apache-jmeter-$JMETER_VERSION/user.properties
@@ -209,7 +211,7 @@ jobs:
     - name: install jmeter
       timeout-minutes: 10
       env:
-          JMETER_VERSION: 5.3
+          JMETER_VERSION: 5.4.3
       run: |
         cd /tmp && tar -xvf apache-jmeter.tgz
         echo "jmeter.save.saveservice.output_format=xml" >> /tmp/apache-jmeter-$JMETER_VERSION/user.properties
@@ -311,7 +313,7 @@ jobs:
     - name: install jmeter
       timeout-minutes: 10
       env:
-          JMETER_VERSION: 5.3
+          JMETER_VERSION: 5.4.3
       run: |
         cd /tmp && tar -xvf apache-jmeter.tgz
         echo "jmeter.save.saveservice.output_format=xml" >> /tmp/apache-jmeter-$JMETER_VERSION/user.properties
@@ -407,7 +409,7 @@ jobs:
     - name: install jmeter
       timeout-minutes: 10
       env:
-          JMETER_VERSION: 5.3
+          JMETER_VERSION: 5.4.3
       run: |
         cd /tmp && tar -xvf apache-jmeter.tgz
         echo "jmeter.save.saveservice.output_format=xml" >> /tmp/apache-jmeter-$JMETER_VERSION/user.properties

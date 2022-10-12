@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2020-2021 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2020-2022 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -21,6 +21,9 @@
 -include("emqx_auth_mnesia.hrl").
 -include_lib("eunit/include/eunit.hrl").
 -include_lib("common_test/include/ct.hrl").
+-include_lib("snabbkaffe/include/snabbkaffe.hrl").
+
+-include_lib("emqx/include/emqx_mqtt.hrl").
 
 -import(emqx_ct_http, [ request_api/3
                       , request_api/5
@@ -74,6 +77,20 @@ set_default(ClientId, UserName, Pwd, HashType) ->
     application:set_env(emqx_auth_mnesia, username_list, [{UserName, Pwd}]),
     application:set_env(emqx_auth_mnesia, password_hash, HashType),
     ok.
+
+init_per_testcase(t_will_message_connection_denied, Config) ->
+    emqx_zone:set_env(external, allow_anonymous, false),
+    Config;
+init_per_testcase(_TestCase, Config) ->
+    Config.
+
+end_per_testcase(t_will_message_connection_denied, _Config) ->
+    emqx_zone:unset_env(external, allow_anonymous),
+    application:stop(emqx_auth_mnesia),
+    ok;
+end_per_testcase(_TestCase, _Config) ->
+    ok.
+
 %%------------------------------------------------------------------------------
 %% Testcases
 %%------------------------------------------------------------------------------
@@ -272,7 +289,8 @@ t_clientid_rest_api(_Config) ->
     clean_all_users(),
 
     {ok, Result1} = request_http_rest_list(["auth_clientid"]),
-    [] = get_http_data(Result1),
+    ?assertMatch(#{<<"data">> := [], <<"meta">> := #{<<"count">> := 0}},
+        emqx_json:decode(Result1, [return_maps])),
 
     Params1 = #{<<"clientid">> => ?CLIENTID, <<"password">> => ?PASSWORD},
     {ok, _} = request_http_rest_add(["auth_clientid"], Params1),
@@ -286,20 +304,46 @@ t_clientid_rest_api(_Config) ->
 
     Params3 = [ #{<<"clientid">> => ?CLIENTID, <<"password">> => ?PASSWORD}
               , #{<<"clientid">> => <<"clientid1">>, <<"password">> => ?PASSWORD}
-              , #{<<"clientid">> => <<"clientid2">>, <<"password">> => ?PASSWORD}
+              , #{<<"clientid">> => <<"client2">>, <<"password">> => ?PASSWORD}
               ],
     {ok, Result3} = request_http_rest_add(["auth_clientid"], Params3),
     ?assertMatch(#{ ?CLIENTID := <<"{error,existed}">>
                   , <<"clientid1">> := <<"ok">>
-                  , <<"clientid2">> := <<"ok">>
+                  , <<"client2">> := <<"ok">>
                   }, get_http_data(Result3)),
 
     {ok, Result4} = request_http_rest_list(["auth_clientid"]),
-    ?assertEqual(3, length(get_http_data(Result4))),
+    #{<<"data">> := Data4, <<"meta">> := #{<<"count">> := Count4}}
+        = emqx_json:decode(Result4, [return_maps]),
+
+    ?assertEqual(3, Count4),
+    ?assertEqual([<<"client2">>, <<"clientid1">>, ?CLIENTID],
+        lists:sort(lists:map(fun(#{<<"clientid">> := C}) -> C end, Data4))),
+
+    UserNameParams = [#{<<"username">> => <<"username1">>, <<"password">> => ?PASSWORD}
+        , #{<<"username">> => <<"username2">>, <<"password">> => ?PASSWORD}
+    ],
+    {ok, _} = request_http_rest_add(["auth_username"], UserNameParams),
+
+    {ok, Result41} = request_http_rest_list(["auth_clientid"]),
+    %% the count clientid is not affected by username count.
+    ?assertEqual(Result4, Result41),
+
+    {ok, Result42} = request_http_rest_list(["auth_username"]),
+    #{<<"data">> := Data42, <<"meta">> := #{<<"count">> := Count42}}
+        = emqx_json:decode(Result42, [return_maps]),
+    ?assertEqual(2, Count42),
+    ?assertEqual([<<"username1">>, <<"username2">>],
+        lists:sort(lists:map(fun(#{<<"username">> := U}) -> U end, Data42))),
+
+    {ok, Result5} = request_http_rest_list(["auth_clientid?_like_clientid=id"]),
+    ?assertEqual(2, length(get_http_data(Result5))),
+    {ok, Result6} = request_http_rest_list(["auth_clientid?_like_clientid=x"]),
+    ?assertEqual(0, length(get_http_data(Result6))),
 
     {ok, _} = request_http_rest_delete(Path),
-    {ok, Result5} = request_http_rest_lookup(Path),
-    ?assertMatch(#{}, get_http_data(Result5)).
+    {ok, Result7} = request_http_rest_lookup(Path),
+    ?assertMatch(#{}, get_http_data(Result7)).
 
 t_username_rest_api(_Config) ->
     clean_all_users(),
@@ -330,9 +374,14 @@ t_username_rest_api(_Config) ->
     {ok, Result4} = request_http_rest_list(["auth_username"]),
     ?assertEqual(3, length(get_http_data(Result4))),
 
+    {ok, Result5} = request_http_rest_list(["auth_username?_like_username=for"]),
+    ?assertEqual(1, length(get_http_data(Result5))),
+    {ok, Result6} = request_http_rest_list(["auth_username?_like_username=x"]),
+    ?assertEqual(0, length(get_http_data(Result6))),
+
     {ok, _} = request_http_rest_delete(Path),
-    {ok, Result5} = request_http_rest_lookup([Path]),
-    ?assertMatch(#{}, get_http_data(Result5)).
+    {ok, Result7} = request_http_rest_lookup([Path]),
+    ?assertMatch(#{}, get_http_data(Result7)).
 
 t_password_hash(_) ->
     clean_all_users(),
@@ -357,6 +406,48 @@ t_password_hash(_) ->
     application:set_env(emqx_auth_mnesia, password_hash, Default),
     application:stop(emqx_auth_mnesia),
     ok = application:start(emqx_auth_mnesia).
+
+t_will_message_connection_denied(Config) when is_list(Config) ->
+    ClientId = <<"subscriber">>,
+    Password = <<"p">>,
+    application:stop(emqx_auth_mnesia),
+    ok = emqx_ct_helpers:start_apps([emqx_auth_mnesia]),
+    ok = emqx_auth_mnesia_cli:add_user({clientid, ClientId}, Password),
+
+    {ok, Subscriber} = emqtt:start_link([
+        {clientid, ClientId},
+        {password, Password}
+    ]),
+    {ok, _} = emqtt:connect(Subscriber),
+    {ok, _, [?RC_SUCCESS]} = emqtt:subscribe(Subscriber, <<"lwt">>),
+
+    process_flag(trap_exit, true),
+
+    {ok, Publisher} = emqtt:start_link([
+        {clientid, <<"publisher">>},
+        {will_topic, <<"lwt">>},
+        {will_payload, <<"should not be published">>}
+    ]),
+    snabbkaffe:start_trace(),
+    ?wait_async_action(
+        {error, _} = emqtt:connect(Publisher),
+        #{?snk_kind := channel_terminated}
+    ),
+    snabbkaffe:stop(),
+
+    timer:sleep(1000),
+
+    receive
+        {publish, #{
+            topic := <<"lwt">>,
+            payload := <<"should not be published">>
+        }} ->
+            ct:fail("should not publish will message")
+    after 0 ->
+        ok
+    end,
+
+    ok.
 
 %%------------------------------------------------------------------------------
 %% Helpers

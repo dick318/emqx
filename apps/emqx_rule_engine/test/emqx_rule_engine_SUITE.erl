@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2020-2021 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2020-2022 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -25,6 +25,9 @@
 -include_lib("eunit/include/eunit.hrl").
 -include_lib("common_test/include/ct.hrl").
 
+-include("emqx_rule_test.hrl").
+-import(emqx_rule_test_lib, [make_simple_resource_type/1]).
+
 %%-define(PROPTEST(M,F), true = proper:quickcheck(M:F())).
 
 all() ->
@@ -49,6 +52,7 @@ groups() ->
       [t_register_provider,
        t_unregister_provider,
        t_create_rule,
+       t_reset_metrics,
        t_create_resource
       ]},
      {actions, [],
@@ -61,7 +65,8 @@ groups() ->
        t_show_action_api,
        t_crud_resources_api,
        t_list_resource_types_api,
-       t_show_resource_type_api
+       t_show_resource_type_api,
+       t_list_rule_api
        ]},
      {cli, [],
       [t_rules_cli,
@@ -90,41 +95,7 @@ groups() ->
        t_resource_types
       ]},
      {runtime, [],
-      [t_match_atom_and_binary,
-       t_sqlselect_0,
-       t_sqlselect_00,
-       t_sqlselect_01,
-       t_sqlselect_02,
-       t_sqlselect_1,
-       t_sqlselect_2,
-       t_sqlselect_2_1,
-       t_sqlselect_2_2,
-       t_sqlselect_2_3,
-       t_sqlselect_3,
-       t_sqlparse_event_1,
-       t_sqlparse_event_2,
-       t_sqlparse_event_3,
-       t_sqlparse_foreach_1,
-       t_sqlparse_foreach_2,
-       t_sqlparse_foreach_3,
-       t_sqlparse_foreach_4,
-       t_sqlparse_foreach_5,
-       t_sqlparse_foreach_6,
-       t_sqlparse_foreach_7,
-       t_sqlparse_foreach_8,
-       t_sqlparse_case_when_1,
-       t_sqlparse_case_when_2,
-       t_sqlparse_case_when_3,
-       t_sqlparse_array_index_1,
-       t_sqlparse_array_index_2,
-       t_sqlparse_array_index_3,
-       t_sqlparse_array_index_4,
-       t_sqlparse_array_index_5,
-       t_sqlparse_select_matadata_1,
-       t_sqlparse_array_range_1,
-       t_sqlparse_array_range_2,
-       t_sqlparse_true_false,
-       t_sqlparse_new_map
+      [t_match_atom_and_binary
       ]},
      {rule_metrics, [],
       [t_metrics,
@@ -160,10 +131,6 @@ init_per_suite(Config) ->
 end_per_suite(_Config) ->
     stop_apps(),
     ok.
-
-on_resource_create(_id, _) -> #{}.
-on_resource_destroy(_id, _) -> ok.
-on_get_resource_status(_id, _) -> #{}.
 
 %%------------------------------------------------------------------------------
 %% Group specific setup/teardown
@@ -261,15 +228,7 @@ init_per_testcase(Test, Config)
     | Config];
 init_per_testcase(_TestCase, Config) ->
     ok = emqx_rule_registry:register_resource_types(
-            [#resource_type{
-                name = built_in,
-                provider = ?APP,
-                params_spec = #{},
-                on_create = {?MODULE, on_resource_create},
-                on_destroy = {?MODULE, on_resource_destroy},
-                on_status = {?MODULE, on_get_resource_status},
-                title = #{en => <<"Built-In Resource Type (debug)">>},
-                description = #{en => <<"The built in resource type for debug purpose">>}}]),
+            [make_simple_debug_resource_type()]),
     %ct:pal("============ ~p", [ets:tab2list(emqx_resource_type)]),
     Config.
 
@@ -279,8 +238,12 @@ end_per_testcase(t_events, Config) ->
     ok = emqx_rule_registry:remove_rule(?config(hook_points_rules, Config)),
     ok = emqx_rule_registry:remove_action('hook-metrics-action');
 end_per_testcase(Test, Config)
-        when Test =:= t_sqlselect_multi_actoins_1,
-             Test =:= t_sqlselect_multi_actoins_2
+        when Test =:= t_sqlselect_multi_actoins_1
+            ;Test =:= t_sqlselect_multi_actoins_1_1
+            ;Test =:= t_sqlselect_multi_actoins_2
+            ;Test =:= t_sqlselect_multi_actoins_3
+            ;Test =:= t_sqlselect_multi_actoins_3_1
+            ;Test =:= t_sqlselect_multi_actoins_4
             ->
     emqtt:stop(?config(subclient, Config)),
     emqtt:stop(?config(connclient, Config)),
@@ -325,6 +288,24 @@ t_create_resource(_Config) ->
     emqx_rule_registry:remove_resource(ResId),
     ok.
 
+t_clean_resource_alarms(_Config) ->
+    ok = emqx_rule_engine:load_providers(),
+    {ok, #resource{id = ResId}} = emqx_rule_engine:create_resource(
+            #{type => built_in,
+              config => #{},
+              description => <<"debug resource">>}),
+    ?assert(true, is_binary(ResId)),
+    Name = emqx_rule_engine:alarm_name_of_resource_down(ResId, built_in),
+    _ = emqx_alarm:activate(Name, #{id => ResId, type => built_in}),
+    AlarmExist = fun(#{name := AName}) -> AName == Name end,
+    Len = length(lists:filter(AlarmExist, emqx_alarm:get_alarms())),
+    ?assert(Len == 1),
+    ok = emqx_rule_engine:unload_providers(),
+    emqx_rule_registry:remove_resource(ResId),
+    LenAfterRemove = length(lists:filter(AlarmExist, emqx_alarm:get_alarms())),
+    ?assert(LenAfterRemove == 0),
+    ok.
+
 %%------------------------------------------------------------------------------
 %% Test cases for rule actions
 %%------------------------------------------------------------------------------
@@ -351,16 +332,65 @@ t_inspect_action(_Config) ->
     emqx_rule_registry:remove_resource(ResId),
     ok.
 
+t_reset_metrics(_Config) ->
+    ok = emqx_rule_engine:load_providers(),
+    {ok, #resource{id = ResId}} = emqx_rule_engine:create_resource(
+                                    #{type => built_in,
+                                      config => #{},
+                                      description => <<"debug resource">>}),
+    {ok, #rule{id = Id}} = emqx_rule_engine:create_rule(
+                             #{rawsql => "select clientid as c, username as u "
+                               "from \"t1\" ",
+                               actions => [#{name => 'inspect',
+                                             args => #{'$resource' => ResId, a=>1, b=>2}}],
+                               type => built_in,
+                               description => <<"Inspect rule">>
+                              }),
+    {ok, Client} = emqtt:start_link([{username, <<"emqx">>}]),
+    {ok, _} = emqtt:connect(Client),
+    [ begin
+          emqtt:publish(Client, <<"t1">>, <<"{\"id\": 1, \"name\": \"ha\"}">>, 0),
+          timer:sleep(100)
+      end
+      || _ <- lists:seq(1,10)],
+    emqx_rule_metrics:reset_metrics(Id),
+    ?assertEqual(#{exception => 0,failed => 0,
+                   matched => 0,no_result => 0,passed => 0,
+                   speed => 0.0,speed_last5m => 0.0,speed_max => 0.0},
+                 emqx_rule_metrics:get_rule_metrics(Id)),
+    ?assertEqual(#{failed => 0,success => 0,taken => 0},
+                   emqx_rule_metrics:get_action_metrics(ResId)),
+    emqtt:stop(Client),
+    emqx_rule_registry:remove_rule(Id),
+    emqx_rule_registry:remove_resource(ResId),
+    ok.
+
 t_republish_action(_Config) ->
-    Qos0Received = emqx_metrics:val('messages.qos0.received'),
+    TargetQoSList = [-1, 0, 1, 2, <<"${qos}">>],
+    TargetRetainList = [true, false, <<"${flags.retain}">>],
+    [[republish_action_test(TargetQoS, TargetRetain) || TargetRetain <- TargetRetainList]
+        || TargetQoS <- TargetQoSList],
+    ok.
+
+republish_action_test(TargetQoS, TargetRetain) ->
+    {QoSReceivedMetricsName, PubQoS} =
+        case TargetQoS of
+            <<"${qos}">> -> {'messages.qos0.received', 0};
+            -1 -> {'messages.qos0.received', 0};
+            0 -> {'messages.qos0.received', 0};
+            1 -> {'messages.qos1.received', 1};
+            2 -> {'messages.qos2.received', 2}
+        end,
+    QosReceived = emqx_metrics:val(QoSReceivedMetricsName),
     Received = emqx_metrics:val('messages.received'),
     ok = emqx_rule_engine:load_providers(),
     {ok, #rule{id = Id, for = [<<"t1">>]}} =
         emqx_rule_engine:create_rule(
-                    #{rawsql => <<"select topic, payload, qos from \"t1\"">>,
+                    #{rawsql => <<"select * from \"t1\"">>,
                       actions => [#{name => 'republish',
                                     args => #{<<"target_topic">> => <<"t2">>,
-                                              <<"target_qos">> => -1,
+                                              <<"target_qos">> => TargetQoS,
+                                              <<"target_retain">> => TargetRetain,
                                               <<"payload_tmpl">> => <<"${payload}">>}}],
                       description => <<"builtin-republish-rule">>}),
     {ok, Client} = emqtt:start_link([{username, <<"emqx">>}]),
@@ -368,7 +398,7 @@ t_republish_action(_Config) ->
     {ok, _, _} = emqtt:subscribe(Client, <<"t2">>, 0),
 
     Msg = <<"{\"id\": 1, \"name\": \"ha\"}">>,
-    emqtt:publish(Client, <<"t1">>, Msg, 0),
+    emqtt:publish(Client, <<"t1">>, Msg, PubQoS),
     receive {publish, #{topic := <<"t2">>, payload := Payload}} ->
         ?assertEqual(Msg, Payload)
     after 1000 ->
@@ -376,7 +406,7 @@ t_republish_action(_Config) ->
     end,
     emqtt:stop(Client),
     emqx_rule_registry:remove_rule(Id),
-    ?assertEqual(2, emqx_metrics:val('messages.qos0.received') - Qos0Received),
+    ?assertEqual(2, emqx_metrics:val(QoSReceivedMetricsName) - QosReceived),
     ?assertEqual(2, emqx_metrics:val('messages.received') - Received),
     ok.
 
@@ -393,6 +423,14 @@ t_crud_rule_api(_Config) ->
                                    {<<"params">>,[{<<"arg1">>,1}]}]]},
                  {<<"description">>, <<"debug rule">>}]),
     RuleID = maps:get(id, Rule),
+    {ok, #{code := 400, message := <<"Already Exists">>}} =
+        emqx_rule_engine_api:create_rule(#{},
+                [{<<"name">>, <<"debug-rule">>},
+                 {<<"id">>, RuleID},
+                 {<<"rawsql">>, <<"select * from \"t/a\"">>},
+                 {<<"actions">>, [[{<<"name">>,<<"inspect">>},
+                                   {<<"params">>,[{<<"arg1">>,1}]}]]},
+                 {<<"description">>, <<"debug rule">>}]),
     %ct:pal("RCreated : ~p", [Rule]),
 
     {ok, #{code := 0, data := Rules}} = emqx_rule_engine_api:list_rules(#{}, []),
@@ -418,7 +456,7 @@ t_crud_rule_api(_Config) ->
                         {<<"params">>,[
                             {<<"arg1">>,1},
                             {<<"target_topic">>, <<"t2">>},
-                            {<<"target_qos">>, -1},
+                            {<<"target_qos">>, 0},
                             {<<"payload_tmpl">>, <<"${payload}">>}
                         ]}
                     ]]
@@ -436,6 +474,74 @@ t_crud_rule_api(_Config) ->
     ?assertMatch({ok, #{code := 404, message := _Message}}, NotFound),
     ok.
 
+t_list_rule_api(_Config) ->
+    AddIds =
+        lists:map(fun(Seq) ->
+            SeqBin = integer_to_binary(Seq),
+            {ok, #{code := 0, data := #{id := Id}}} =
+                emqx_rule_engine_api:create_rule(#{},
+                    [{<<"name">>, <<"debug-rule-", SeqBin/binary>>},
+                        {<<"rawsql">>, <<"select * from \"t/a/", SeqBin/binary, "\"">>},
+                        {<<"actions">>, [[{<<"name">>,<<"inspect">>}, {<<"params">>,[{<<"arg1">>,1}]}]]},
+                        {<<"description">>, <<"debug rule desc ", SeqBin/binary>>}]),
+            Id
+                  end, lists:seq(1, 20)),
+
+    {ok, #{code := 0, data := Rules11}} = emqx_rule_engine_api:list_rules(#{},
+        [{<<"_limit">>,<<"10">>}, {<<"_page">>, <<"1">>}, {<<"enable_paging">>, true}]),
+    ?assertEqual(10, length(Rules11)),
+    {ok, #{code := 0, data := Rules12}} = emqx_rule_engine_api:list_rules(#{},
+        [{<<"_limit">>,<<"10">>}, {<<"_page">>, <<"2">>}, {<<"enable_paging">>, true}]),
+    ?assertEqual(10, length(Rules12)),
+    Rules1 = Rules11 ++ Rules12,
+
+    [RuleID | _] = AddIds,
+    {ok, #{code := 0}} = emqx_rule_engine_api:update_rule(#{id => RuleID},
+        [{<<"enabled">>, false}]),
+    Params1 = [{<<"enabled">>,<<"true">>}, {<<"enable_paging">>, true}],
+    {ok, #{code := 0, data := Rules2}} = emqx_rule_engine_api:list_rules(#{}, Params1),
+    ?assert(lists:all(fun(#{id := ID}) -> ID =/= RuleID end, Rules2)),
+
+    Params2 = [{<<"for">>, RuleID}, {<<"enable_paging">>, true}],
+    {ok, #{code := 0, data := Rules3}} = emqx_rule_engine_api:list_rules(#{}, Params2),
+    ?assert(lists:all(fun(#{id := ID}) -> ID =:= RuleID end, Rules3)),
+
+    Params3 = [{<<"_like_id">>,<<"rule:">>}, {<<"enable_paging">>, true}],
+    {ok, #{code := 0, data := Rules4}} = emqx_rule_engine_api:list_rules(#{}, Params3),
+    ?assertEqual(length(Rules1), length(Rules4)),
+
+    Params4 = [{<<"_like_for">>,<<"t/a/">>}, {<<"enable_paging">>, true}],
+    {ok, #{code := 0, data := Rules5}} = emqx_rule_engine_api:list_rules(#{}, Params4),
+    ?assertEqual(length(Rules1), length(Rules5)),
+    {ok, #{code := 0}} = emqx_rule_engine_api:update_rule(#{id => RuleID},
+        [{<<"rawsql">>, <<"select * from \"t/b/c\"">>}]),
+    {ok, #{code := 0, data := Rules6}} = emqx_rule_engine_api:list_rules(#{}, Params4),
+    ?assert(lists:all(fun(#{id := ID}) -> ID =/= RuleID end, Rules6)),
+    ?assertEqual(1, length(Rules1) - length(Rules6)),
+
+    Params5 = [{<<"_match_for">>,<<"t/+/+">>}, {<<"enable_paging">>, true}],
+    {ok, #{code := 0, data := Rules7}} = emqx_rule_engine_api:list_rules(#{}, Params5),
+    ?assertEqual(length(Rules1), length(Rules7)),
+    {ok, #{code := 0}} = emqx_rule_engine_api:update_rule(#{id => RuleID},
+        [{<<"rawsql">>, <<"select * from \"t1/b\"">>}]),
+    {ok, #{code := 0, data := Rules8}} = emqx_rule_engine_api:list_rules(#{}, Params5),
+    ?assert(lists:all(fun(#{id := ID}) -> ID =/= RuleID end, Rules8)),
+    ?assertEqual(1, length(Rules1) - length(Rules8)),
+
+    Params6 = [{<<"_like_description">>,<<"rule">>}, {<<"enable_paging">>, true}],
+    {ok, #{code := 0, data := Rules9}} = emqx_rule_engine_api:list_rules(#{}, Params6),
+    ?assertEqual(length(Rules1), length(Rules9)),
+    {ok, #{code := 0}} = emqx_rule_engine_api:update_rule(#{id => RuleID},
+        [{<<"description">>, <<"not me">>}]),
+    {ok, #{code := 0, data := Rules10}} = emqx_rule_engine_api:list_rules(#{}, Params6),
+    ?assert(lists:all(fun(#{id := ID}) -> ID =/= RuleID end, Rules10)),
+    ?assertEqual(1, length(Rules1) - length(Rules10)),
+
+    lists:foreach(fun(ID) ->
+        ?assertMatch({ok, #{code := 0}}, emqx_rule_engine_api:delete_rule(#{id => ID}, []))
+                  end, AddIds),
+    ok.
+
 t_list_actions_api(_Config) ->
     {ok, #{code := 0, data := Actions}} = emqx_rule_engine_api:list_actions(#{}, []),
     %ct:pal("RList : ~p", [Actions]),
@@ -449,13 +555,18 @@ t_show_action_api(_Config) ->
     ok.
 
 t_crud_resources_api(_Config) ->
+    ResParams = [
+        {<<"name">>, <<"Simple Resource">>},
+        {<<"type">>, <<"built_in">>},
+        {<<"config">>, [{<<"a">>, 1}]},
+        {<<"description">>, <<"Simple Resource">>}
+    ],
     {ok, #{code := 0, data := Resources1}} =
-        emqx_rule_engine_api:create_resource(#{},
-            [{<<"name">>, <<"Simple Resource">>},
-             {<<"type">>, <<"built_in">>},
-             {<<"config">>, [{<<"a">>, 1}]},
-             {<<"description">>, <<"Simple Resource">>}]),
+        emqx_rule_engine_api:create_resource(#{}, ResParams),
     ResId = maps:get(id, Resources1),
+    %% create again using given resource id returns error
+    {ok, #{code := 400, message := <<"Already Exists">>}} =
+        emqx_rule_engine_api:create_resource(#{}, [{<<"id">>, ResId} | ResParams]),
     {ok, #{code := 0, data := Resources}} = emqx_rule_engine_api:list_resources(#{}, []),
     ?assert(length(Resources) > 0),
     {ok, #{code := 0, data := Resources2}} = emqx_rule_engine_api:show_resource(#{id => ResId}, []),
@@ -1111,8 +1222,8 @@ t_match_atom_and_binary(_Config) ->
     {ok, _} = emqtt:connect(Client),
     {ok, _, _} = emqtt:subscribe(Client, <<"t2">>, 0),
     ct:sleep(100),
-    {ok, Client2} = emqtt:start_link([{username, <<"emqx2">>}]),
-    {ok, _} = emqtt:connect(Client2),
+    {ok, Client1} = emqtt:start_link([{username, <<"emqx2">>}]),
+    {ok, _} = emqtt:connect(Client1),
     receive {publish, #{topic := T, payload := Payload}} ->
         ?assertEqual(<<"t2">>, T),
         <<"user:", ConnAt/binary>> = Payload,
@@ -1121,325 +1232,7 @@ t_match_atom_and_binary(_Config) ->
         ct:fail(wait_for_t2)
     end,
 
-    emqtt:stop(Client),
-    emqx_rule_registry:remove_rule(TopicRule).
-
-t_sqlselect_0(_Config) ->
-    %% Verify SELECT with and without 'AS'
-    Sql = "select * "
-          "from \"t/#\" "
-          "where payload.cmd.info = 'tt'",
-    ?assertMatch({ok,#{payload := <<"{\"cmd\": {\"info\":\"tt\"}}">>}},
-                 emqx_rule_sqltester:test(
-                    #{<<"rawsql">> => Sql,
-                      <<"ctx">> =>
-                        #{<<"payload">> =>
-                            <<"{\"cmd\": {\"info\":\"tt\"}}">>,
-                          <<"topic">> => <<"t/a">>}})),
-    Sql2 = "select payload.cmd as cmd "
-           "from \"t/#\" "
-           "where cmd.info = 'tt'",
-    ?assertMatch({ok,#{<<"cmd">> := #{<<"info">> := <<"tt">>}}},
-                 emqx_rule_sqltester:test(
-                    #{<<"rawsql">> => Sql2,
-                      <<"ctx">> =>
-                        #{<<"payload">> =>
-                            <<"{\"cmd\": {\"info\":\"tt\"}}">>,
-                          <<"topic">> => <<"t/a">>}})),
-    Sql3 = "select payload.cmd as cmd, cmd.info as info "
-           "from \"t/#\" "
-           "where cmd.info = 'tt' and info = 'tt'",
-    ?assertMatch({ok,#{<<"cmd">> := #{<<"info">> := <<"tt">>},
-                       <<"info">> := <<"tt">>}},
-                 emqx_rule_sqltester:test(
-                    #{<<"rawsql">> => Sql3,
-                      <<"ctx">> =>
-                        #{<<"payload">> =>
-                            <<"{\"cmd\": {\"info\":\"tt\"}}">>,
-                          <<"topic">> => <<"t/a">>}})),
-    %% cascaded as
-    Sql4 = "select payload.cmd as cmd, cmd.info as meta.info "
-           "from \"t/#\" "
-           "where cmd.info = 'tt' and meta.info = 'tt'",
-    ?assertMatch({ok,#{<<"cmd">> := #{<<"info">> := <<"tt">>},
-                       <<"meta">> := #{<<"info">> := <<"tt">>}}},
-                 emqx_rule_sqltester:test(
-                    #{<<"rawsql">> => Sql4,
-                      <<"ctx">> =>
-                        #{<<"payload">> =>
-                            <<"{\"cmd\": {\"info\":\"tt\"}}">>,
-                          <<"topic">> => <<"t/a">>}})).
-
-t_sqlselect_00(_Config) ->
-    %% Verify plus/subtract and unary_add_or_subtract
-    Sql = "select 1-1 as a "
-          "from \"t/#\" ",
-    ?assertMatch({ok,#{<<"a">> := 0}},
-                 emqx_rule_sqltester:test(
-                    #{<<"rawsql">> => Sql,
-                      <<"ctx">> =>
-                        #{<<"payload">> => <<"">>,
-                          <<"topic">> => <<"t/a">>}})),
-    Sql1 = "select -1 + 1 as a "
-           "from \"t/#\" ",
-    ?assertMatch({ok,#{<<"a">> := 0}},
-                 emqx_rule_sqltester:test(
-                    #{<<"rawsql">> => Sql1,
-                      <<"ctx">> =>
-                        #{<<"payload">> => <<"">>,
-                          <<"topic">> => <<"t/a">>}})),
-    Sql2 = "select 1 + 1 as a "
-           "from \"t/#\" ",
-    ?assertMatch({ok,#{<<"a">> := 2}},
-                 emqx_rule_sqltester:test(
-                    #{<<"rawsql">> => Sql2,
-                      <<"ctx">> =>
-                        #{<<"payload">> => <<"">>,
-                          <<"topic">> => <<"t/a">>}})),
-    Sql3 = "select +1 as a "
-           "from \"t/#\" ",
-    ?assertMatch({ok,#{<<"a">> := 1}},
-                 emqx_rule_sqltester:test(
-                    #{<<"rawsql">> => Sql3,
-                      <<"ctx">> =>
-                        #{<<"payload">> => <<"">>,
-                          <<"topic">> => <<"t/a">>}})).
-
-t_sqlselect_01(_Config) ->
-    ok = emqx_rule_engine:load_providers(),
-    TopicRule1 = create_simple_repub_rule(
-                    <<"t2">>,
-                    "SELECT json_decode(payload) as p, payload "
-                    "FROM \"t3/#\", \"t1\" "
-                    "WHERE p.x = 1"),
-    {ok, Client} = emqtt:start_link([{username, <<"emqx">>}]),
-    {ok, _} = emqtt:connect(Client),
-    {ok, _, _} = emqtt:subscribe(Client, <<"t2">>, 0),
-    emqtt:publish(Client, <<"t1">>, <<"{\"x\":1}">>, 0),
-    ct:sleep(100),
-    receive {publish, #{topic := T, payload := Payload}} ->
-        ?assertEqual(<<"t2">>, T),
-        ?assertEqual(<<"{\"x\":1}">>, Payload)
-    after 1000 ->
-        ct:fail(wait_for_t2)
-    end,
-
-    emqtt:publish(Client, <<"t1">>, <<"{\"x\":2}">>, 0),
-    receive {publish, #{topic := <<"t2">>, payload := _}} ->
-        ct:fail(unexpected_t2)
-    after 1000 ->
-        ok
-    end,
-
-    emqtt:publish(Client, <<"t3/a">>, <<"{\"x\":1}">>, 0),
-    receive {publish, #{topic := T3, payload := Payload3}} ->
-        ?assertEqual(<<"t2">>, T3),
-        ?assertEqual(<<"{\"x\":1}">>, Payload3)
-    after 1000 ->
-        ct:fail(wait_for_t2)
-    end,
-
-    emqtt:stop(Client),
-    emqx_rule_registry:remove_rule(TopicRule1).
-
-t_sqlselect_02(_Config) ->
-    ok = emqx_rule_engine:load_providers(),
-    TopicRule1 = create_simple_repub_rule(
-                    <<"t2">>,
-                    "SELECT * "
-                    "FROM \"t3/#\", \"t1\" "
-                    "WHERE payload.x = 1"),
-    {ok, Client} = emqtt:start_link([{username, <<"emqx">>}]),
-    {ok, _} = emqtt:connect(Client),
-    {ok, _, _} = emqtt:subscribe(Client, <<"t2">>, 0),
-    emqtt:publish(Client, <<"t1">>, <<"{\"x\":1}">>, 0),
-    ct:sleep(100),
-    receive {publish, #{topic := T, payload := Payload}} ->
-        ?assertEqual(<<"t2">>, T),
-        ?assertEqual(<<"{\"x\":1}">>, Payload)
-    after 1000 ->
-        ct:fail(wait_for_t2)
-    end,
-
-    emqtt:publish(Client, <<"t1">>, <<"{\"x\":2}">>, 0),
-    receive {publish, #{topic := <<"t2">>, payload := Payload0}} ->
-        ct:fail({unexpected_t2, Payload0})
-    after 1000 ->
-        ok
-    end,
-
-    emqtt:publish(Client, <<"t3/a">>, <<"{\"x\":1}">>, 0),
-    receive {publish, #{topic := T3, payload := Payload3}} ->
-        ?assertEqual(<<"t2">>, T3),
-        ?assertEqual(<<"{\"x\":1}">>, Payload3)
-    after 1000 ->
-        ct:fail(wait_for_t2)
-    end,
-
-    emqtt:stop(Client),
-    emqx_rule_registry:remove_rule(TopicRule1).
-
-t_sqlselect_1(_Config) ->
-    ok = emqx_rule_engine:load_providers(),
-    TopicRule = create_simple_repub_rule(
-                    <<"t2">>,
-                    "SELECT json_decode(payload) as p, payload "
-                    "FROM \"t1\" "
-                    "WHERE p.x = 1 and p.y = 2"),
-    {ok, Client} = emqtt:start_link([{username, <<"emqx">>}]),
-    {ok, _} = emqtt:connect(Client),
-    {ok, _, _} = emqtt:subscribe(Client, <<"t2">>, 0),
-    ct:sleep(200),
-    emqtt:publish(Client, <<"t1">>, <<"{\"x\":1,\"y\":2}">>, 0),
-    receive {publish, #{topic := T, payload := Payload}} ->
-        ?assertEqual(<<"t2">>, T),
-        ?assertEqual(<<"{\"x\":1,\"y\":2}">>, Payload)
-    after 1000 ->
-        ct:fail(wait_for_t2)
-    end,
-
-    emqtt:publish(Client, <<"t1">>, <<"{\"x\":1,\"y\":1}">>, 0),
-    receive {publish, #{topic := <<"t2">>, payload := _}} ->
-        ct:fail(unexpected_t2)
-    after 1000 ->
-        ok
-    end,
-
-    emqtt:stop(Client),
-    emqx_rule_registry:remove_rule(TopicRule).
-
-t_sqlselect_2(_Config) ->
-    ok = emqx_rule_engine:load_providers(),
-    %% recursively republish to t2
-    TopicRule = create_simple_repub_rule(
-                    <<"t2">>,
-                    "SELECT * "
-                    "FROM \"t2\" "),
-    {ok, Client} = emqtt:start_link([{username, <<"emqx">>}]),
-    {ok, _} = emqtt:connect(Client),
-    {ok, _, _} = emqtt:subscribe(Client, <<"t2">>, 0),
-
-    emqtt:publish(Client, <<"t2">>, <<"{\"x\":1,\"y\":144}">>, 0),
-    Fun = fun() ->
-            receive {publish, #{topic := <<"t2">>, payload := _}} ->
-                received_t2
-            after 500 ->
-                received_nothing
-            end
-          end,
-    received_t2 = Fun(),
-    received_t2 = Fun(),
-    received_nothing = Fun(),
-
-    emqtt:stop(Client),
-    emqx_rule_registry:remove_rule(TopicRule).
-
-t_sqlselect_2_1(_Config) ->
-    ok = emqx_rule_engine:load_providers(),
-    %% recursively republish to t2, if the msg dropped
-    TopicRule = create_simple_repub_rule(
-                    <<"t2">>,
-                    "SELECT * "
-                    "FROM \"$events/message_dropped\" "),
-    {ok, Client} = emqtt:start_link([{username, <<"emqx">>}]),
-    {ok, _} = emqtt:connect(Client),
-    emqtt:publish(Client, <<"t2">>, <<"{\"x\":1,\"y\":144}">>, 0),
-    Fun = fun() ->
-            receive {publish, #{topic := <<"t2">>, payload := _}} ->
-                received_t2
-            after 500 ->
-                received_nothing
-            end
-          end,
-    received_nothing = Fun(),
-
-    %% it should not keep republishing "t2"
-    {ok, _, _} = emqtt:subscribe(Client, <<"t2">>, 0),
-    received_nothing = Fun(),
-
-    emqtt:stop(Client),
-    emqx_rule_registry:remove_rule(TopicRule).
-
-t_sqlselect_2_2(_Config) ->
-    ok = emqx_rule_engine:load_providers(),
-    %% recursively republish to t2, if the msg acked
-    TopicRule = create_simple_repub_rule(
-                    <<"t2">>,
-                    "SELECT * "
-                    "FROM \"$events/message_acked\" "),
-    {ok, Client} = emqtt:start_link([{username, <<"emqx">>}]),
-    {ok, _} = emqtt:connect(Client),
-    {ok, _, _} = emqtt:subscribe(Client, <<"t2">>, 1),
-    emqtt:publish(Client, <<"t2">>, <<"{\"x\":1,\"y\":144}">>, 1),
-    Fun = fun() ->
-            receive {publish, #{topic := <<"t2">>, payload := _}} ->
-                received_t2
-            after 500 ->
-                received_nothing
-            end
-          end,
-    received_t2 = Fun(),
-    received_t2 = Fun(),
-    received_nothing = Fun(),
-
-    emqtt:stop(Client),
-    emqx_rule_registry:remove_rule(TopicRule).
-
-t_sqlselect_2_3(_Config) ->
-    ok = emqx_rule_engine:load_providers(),
-    %% recursively republish to t2, if the msg delivered
-    TopicRule = create_simple_repub_rule(
-                    <<"t2">>,
-                    "SELECT * "
-                    "FROM \"$events/message_delivered\" "),
-    {ok, Client} = emqtt:start_link([{username, <<"emqx">>}]),
-    {ok, _} = emqtt:connect(Client),
-    {ok, _, _} = emqtt:subscribe(Client, <<"t2">>, 0),
-    emqtt:publish(Client, <<"t2">>, <<"{\"x\":1,\"y\":144}">>, 0),
-    Fun = fun() ->
-            receive {publish, #{topic := <<"t2">>, payload := _}} ->
-                received_t2
-            after 500 ->
-                received_nothing
-            end
-          end,
-    received_t2 = Fun(),
-    received_t2 = Fun(),
-    received_nothing = Fun(),
-
-    emqtt:stop(Client),
-    emqx_rule_registry:remove_rule(TopicRule).
-
-t_sqlselect_3(_Config) ->
-    ok = emqx_rule_engine:load_providers(),
-    %% republish the client.connected msg
-    TopicRule = create_simple_repub_rule(
-                    <<"t2">>,
-                    "SELECT * "
-                    "FROM \"$events/client_connected\" "
-                    "WHERE username = 'emqx1'",
-                    <<"clientid=${clientid}">>),
-    {ok, Client} = emqtt:start_link([{clientid, <<"emqx0">>}, {username, <<"emqx0">>}]),
-    {ok, _} = emqtt:connect(Client),
-    {ok, _, _} = emqtt:subscribe(Client, <<"t2">>, 0),
-    ct:sleep(200),
-    {ok, Client1} = emqtt:start_link([{clientid, <<"c_emqx1">>}, {username, <<"emqx1">>}]),
-    {ok, _} = emqtt:connect(Client1),
-    receive {publish, #{topic := T, payload := Payload}} ->
-        ?assertEqual(<<"t2">>, T),
-        ?assertEqual(<<"clientid=c_emqx1">>, Payload)
-    after 1000 ->
-        ct:fail(wait_for_t2)
-    end,
-
-    emqtt:publish(Client, <<"t1">>, <<"{\"x\":1,\"y\":1}">>, 0),
-    receive {publish, #{topic := <<"t2">>, payload := _}} ->
-        ct:fail(unexpected_t2)
-    after 1000 ->
-        ok
-    end,
-
-    emqtt:stop(Client),
+    emqtt:stop(Client), emqtt:stop(Client1),
     emqx_rule_registry:remove_rule(TopicRule).
 
 t_metrics(_Config) ->
@@ -1743,618 +1536,6 @@ t_sqlselect_multi_actoins_4(Config) ->
 
     emqx_rule_registry:remove_rule(Rule).
 
-t_sqlparse_event_1(_Config) ->
-    Sql = "select topic as tp "
-          "from \"$events/session_subscribed\" ",
-    ?assertMatch({ok,#{<<"tp">> := <<"t/tt">>}},
-        emqx_rule_sqltester:test(
-        #{<<"rawsql">> => Sql,
-          <<"ctx">> => #{<<"topic">> => <<"t/tt">>}})).
-
-t_sqlparse_event_2(_Config) ->
-    Sql = "select clientid "
-          "from \"$events/client_connected\" ",
-    ?assertMatch({ok,#{<<"clientid">> := <<"abc">>}},
-        emqx_rule_sqltester:test(
-        #{<<"rawsql">> => Sql,
-          <<"ctx">> => #{<<"clientid">> => <<"abc">>}})).
-
-t_sqlparse_event_3(_Config) ->
-    Sql = "select clientid, topic as tp "
-          "from \"t/tt\", \"$events/client_connected\" ",
-    ?assertMatch({ok,#{<<"clientid">> := <<"abc">>, <<"tp">> := <<"t/tt">>}},
-        emqx_rule_sqltester:test(
-        #{<<"rawsql">> => Sql,
-          <<"ctx">> => #{<<"clientid">> => <<"abc">>, <<"topic">> => <<"t/tt">>}})).
-
-t_sqlparse_foreach_1(_Config) ->
-    %% Verify foreach with and without 'AS'
-    Sql = "foreach payload.sensors as s "
-          "from \"t/#\" ",
-    ?assertMatch({ok,[#{<<"s">> := 1}, #{<<"s">> := 2}]},
-                 emqx_rule_sqltester:test(
-                    #{<<"rawsql">> => Sql,
-                      <<"ctx">> => #{<<"payload">> => <<"{\"sensors\": [1, 2]}">>,
-                                     <<"topic">> => <<"t/a">>}})),
-    Sql2 = "foreach payload.sensors "
-          "from \"t/#\" ",
-    ?assertMatch({ok,[#{item := 1}, #{item := 2}]},
-                 emqx_rule_sqltester:test(
-                    #{<<"rawsql">> => Sql2,
-                      <<"ctx">> => #{<<"payload">> => <<"{\"sensors\": [1, 2]}">>,
-                                     <<"topic">> => <<"t/a">>}})),
-    Sql3 = "foreach payload.sensors "
-          "from \"t/#\" ",
-    ?assertMatch({ok,[#{item := #{<<"cmd">> := <<"1">>}, clientid := <<"c_a">>},
-                       #{item := #{ <<"cmd">> := <<"2">>
-                                  , <<"name">> := <<"ct">>
-                                  }
-                        , clientid := <<"c_a">>}]},
-                 emqx_rule_sqltester:test(
-                    #{<<"rawsql">> => Sql3,
-                      <<"ctx">> =>
-                          #{ <<"payload">> => <<"{\"sensors\": [{\"cmd\":\"1\"}, "
-                                                "{\"cmd\":\"2\",\"name\":\"ct\"}]}">>
-                           , <<"clientid">> => <<"c_a">>
-                           , <<"topic">> => <<"t/a">>
-                           }})),
-    Sql4 = "foreach payload.sensors "
-          "from \"t/#\" ",
-    {ok,[#{metadata := #{rule_id := TRuleId}},
-         #{metadata := #{rule_id := TRuleId}}]} =
-                 emqx_rule_sqltester:test(
-                    #{<<"rawsql">> => Sql4,
-                      <<"ctx">> => #{
-                          <<"payload">> => <<"{\"sensors\": [1, 2]}">>,
-                          <<"topic">> => <<"t/a">>}}),
-    ?assert(is_binary(TRuleId)).
-
-t_sqlparse_foreach_2(_Config) ->
-    %% Verify foreach-do with and without 'AS'
-    Sql = "foreach payload.sensors as s "
-          "do s.cmd as msg_type "
-          "from \"t/#\" ",
-    ?assertMatch({ok,[#{<<"msg_type">> := <<"1">>},#{<<"msg_type">> := <<"2">>}]},
-                 emqx_rule_sqltester:test(
-                    #{<<"rawsql">> => Sql,
-                      <<"ctx">> =>
-                        #{<<"payload">> =>
-                            <<"{\"sensors\": [{\"cmd\":\"1\"}, {\"cmd\":\"2\"}]}">>,
-                          <<"topic">> => <<"t/a">>}})),
-    Sql2 = "foreach payload.sensors "
-          "do item.cmd as msg_type "
-          "from \"t/#\" ",
-    ?assertMatch({ok,[#{<<"msg_type">> := <<"1">>},#{<<"msg_type">> := <<"2">>}]},
-                 emqx_rule_sqltester:test(
-                    #{<<"rawsql">> => Sql2,
-                      <<"ctx">> =>
-                        #{<<"payload">> =>
-                            <<"{\"sensors\": [{\"cmd\":\"1\"}, {\"cmd\":\"2\"}]}">>,
-                          <<"topic">> => <<"t/a">>}})),
-    Sql3 = "foreach payload.sensors "
-           "do item as item "
-           "from \"t/#\" ",
-    ?assertMatch({ok,[#{<<"item">> := 1},#{<<"item">> := 2}]},
-                 emqx_rule_sqltester:test(
-                    #{<<"rawsql">> => Sql3,
-                      <<"ctx">> =>
-                        #{<<"payload">> =>
-                            <<"{\"sensors\": [1, 2]}">>,
-                          <<"topic">> => <<"t/a">>}})).
-
-t_sqlparse_foreach_3(_Config) ->
-    %% Verify foreach-incase with and without 'AS'
-    Sql = "foreach payload.sensors as s "
-          "incase s.cmd != 1 "
-          "from \"t/#\" ",
-    ?assertMatch({ok,[#{<<"s">> := #{<<"cmd">> := 2}},
-                      #{<<"s">> := #{<<"cmd">> := 3}}
-                      ]},
-                 emqx_rule_sqltester:test(
-                    #{<<"rawsql">> => Sql,
-                      <<"ctx">> =>
-                        #{<<"payload">> =>
-                            <<"{\"sensors\": [{\"cmd\":1}, {\"cmd\":2}, {\"cmd\":3}]}">>,
-                          <<"topic">> => <<"t/a">>}})),
-    Sql2 = "foreach payload.sensors "
-          "incase item.cmd != 1 "
-          "from \"t/#\" ",
-    ?assertMatch({ok,[#{item := #{<<"cmd">> := 2}},
-                      #{item := #{<<"cmd">> := 3}}
-                      ]},
-                 emqx_rule_sqltester:test(
-                    #{<<"rawsql">> => Sql2,
-                      <<"ctx">> =>
-                        #{<<"payload">> =>
-                            <<"{\"sensors\": [{\"cmd\":1}, {\"cmd\":2}, {\"cmd\":3}]}">>,
-                          <<"topic">> => <<"t/a">>}})).
-
-t_sqlparse_foreach_4(_Config) ->
-    %% Verify foreach-do-incase
-    Sql = "foreach payload.sensors as s "
-          "do s.cmd as msg_type, s.name as name "
-          "incase is_not_null(s.cmd) "
-          "from \"t/#\" ",
-    ?assertMatch({ok,[#{<<"msg_type">> := <<"1">>},#{<<"msg_type">> := <<"2">>}]},
-                 emqx_rule_sqltester:test(
-                    #{<<"rawsql">> => Sql,
-                      <<"ctx">> =>
-                        #{<<"payload">> =>
-                            <<"{\"sensors\": [{\"cmd\":\"1\"}, {\"cmd\":\"2\"}]}">>,
-                          <<"topic">> => <<"t/a">>}})),
-    ?assertMatch({ ok
-                 , [ #{<<"msg_type">> := <<"1">>, <<"name">> := <<"n1">>}
-                   , #{<<"msg_type">> := <<"2">>}
-                   ]
-                 },
-                 emqx_rule_sqltester:test(
-                    #{<<"rawsql">> => Sql,
-                      <<"ctx">> =>
-                        #{<<"payload">> =>
-                            <<"{\"sensors\": [{\"cmd\":\"1\", \"name\":\"n1\"}, "
-                              "{\"cmd\":\"2\"}, {\"name\":\"n3\"}]}">>,
-                          <<"topic">> => <<"t/a">>}})),
-    ?assertMatch({ok,[]},
-                 emqx_rule_sqltester:test(
-                    #{<<"rawsql">> => Sql,
-                      <<"ctx">> =>
-                        #{<<"payload">> => <<"{\"sensors\": [1, 2]}">>,
-                          <<"topic">> => <<"t/a">>}})).
-
-t_sqlparse_foreach_5(_Config) ->
-    %% Verify foreach on a empty-list or non-list variable
-    Sql = "foreach payload.sensors as s "
-          "do s.cmd as msg_type, s.name as name "
-          "from \"t/#\" ",
-    ?assertMatch({ok,[]}, emqx_rule_sqltester:test(
-                    #{<<"rawsql">> => Sql,
-                      <<"ctx">> =>
-                        #{<<"payload">> => <<"{\"sensors\": 1}">>,
-                          <<"topic">> => <<"t/a">>}})),
-    ?assertMatch({ok,[]},
-                 emqx_rule_sqltester:test(
-                    #{<<"rawsql">> => Sql,
-                      <<"ctx">> =>
-                        #{<<"payload">> => <<"{\"sensors\": []}">>,
-                          <<"topic">> => <<"t/a">>}})),
-    Sql2 = "foreach payload.sensors "
-          "from \"t/#\" ",
-    ?assertMatch({ok,[]}, emqx_rule_sqltester:test(
-                    #{<<"rawsql">> => Sql2,
-                      <<"ctx">> =>
-                        #{<<"payload">> => <<"{\"sensors\": 1}">>,
-                          <<"topic">> => <<"t/a">>}})).
-
-t_sqlparse_foreach_6(_Config) ->
-    %% Verify foreach on a empty-list or non-list variable
-    Sql = "foreach json_decode(payload) "
-          "do item.id as zid, timestamp as t "
-          "from \"t/#\" ",
-    {ok, Res} = emqx_rule_sqltester:test(
-                    #{<<"rawsql">> => Sql,
-                      <<"ctx">> =>
-                        #{<<"payload">> => <<"[{\"id\": 5},{\"id\": 15}]">>,
-                          <<"topic">> => <<"t/a">>}}),
-    [#{<<"t">> := Ts1, <<"zid">> := Zid1},
-     #{<<"t">> := Ts2, <<"zid">> := Zid2}] = Res,
-    ?assertEqual(true, is_integer(Ts1)),
-    ?assertEqual(true, is_integer(Ts2)),
-    ?assert(Zid1 == 5 orelse Zid1 == 15),
-    ?assert(Zid2 == 5 orelse Zid2 == 15).
-
-t_sqlparse_foreach_7(_Config) ->
-    %% Verify foreach-do-incase and cascaded AS
-    Sql = "foreach json_decode(payload) as p, p.sensors as s, s.collection as c, c.info as info "
-          "do info.cmd as msg_type, info.name as name "
-          "incase is_not_null(info.cmd) "
-          "from \"t/#\" "
-          "where s.page = '2' ",
-    Payload  = <<"{\"sensors\": {\"page\": 2, \"collection\": "
-                 "{\"info\":[{\"name\":\"cmd1\", \"cmd\":\"1\"}, {\"cmd\":\"2\"}]} } }">>,
-    ?assertMatch({ ok
-                 , [ #{<<"name">> := <<"cmd1">>, <<"msg_type">> := <<"1">>}
-                   , #{<<"msg_type">> := <<"2">>}
-                   ]
-                 },
-                 emqx_rule_sqltester:test(
-                    #{<<"rawsql">> => Sql,
-                      <<"ctx">> =>
-                        #{<<"payload">> => Payload,
-                          <<"topic">> => <<"t/a">>}})),
-    Sql2 = "foreach json_decode(payload) as p, p.sensors as s, s.collection as c, c.info as info "
-          "do info.cmd as msg_type, info.name as name "
-          "incase is_not_null(info.cmd) "
-          "from \"t/#\" "
-          "where s.page = '3' ",
-    ?assertMatch({error, nomatch},
-                 emqx_rule_sqltester:test(
-                    #{<<"rawsql">> => Sql2,
-                      <<"ctx">> =>
-                        #{<<"payload">> => Payload,
-                          <<"topic">> => <<"t/a">>}})).
-
-t_sqlparse_foreach_8(_Config) ->
-    %% Verify foreach-do-incase and cascaded AS
-    Sql = "foreach json_decode(payload) as p, p.sensors as s, s.collection as c, c.info as info "
-          "do info.cmd as msg_type, info.name as name "
-          "incase is_map(info) "
-          "from \"t/#\" "
-          "where s.page = '2' ",
-    Payload  = <<"{\"sensors\": {\"page\": 2, \"collection\": "
-                 "{\"info\":[\"haha\", {\"name\":\"cmd1\", \"cmd\":\"1\"}]} } }">>,
-    ?assertMatch({ok,[#{<<"name">> := <<"cmd1">>, <<"msg_type">> := <<"1">>}]},
-                 emqx_rule_sqltester:test(
-                    #{<<"rawsql">> => Sql,
-                      <<"ctx">> =>
-                        #{<<"payload">> => Payload,
-                          <<"topic">> => <<"t/a">>}})),
-
-    Sql3 = "foreach json_decode(payload) as p, p.sensors as s,"
-           " s.collection as c, sublist(2,1,c.info) as info "
-           "do info.cmd as msg_type, info.name as name "
-           "from \"t/#\" "
-           "where s.page = '2' ",
-    [?assertMatch({ok,[#{<<"name">> := <<"cmd1">>, <<"msg_type">> := <<"1">>}]},
-                 emqx_rule_sqltester:test(
-                    #{<<"rawsql">> => SqlN,
-                      <<"ctx">> =>
-                        #{<<"payload">> => Payload,
-                          <<"topic">> => <<"t/a">>}}))
-     || SqlN <- [Sql3]].
-
-t_sqlparse_case_when_1(_Config) ->
-    %% case-when-else clause
-    Sql = "select "
-          "  case when payload.x < 0 then 0 "
-          "       when payload.x > 7 then 7 "
-          "       else payload.x "
-          "  end as y "
-          "from \"t/#\" ",
-    ?assertMatch({ok, #{<<"y">> := 1}}, emqx_rule_sqltester:test(
-                    #{<<"rawsql">> => Sql,
-                      <<"ctx">> => #{<<"payload">> => <<"{\"x\": 1}">>,
-                                     <<"topic">> => <<"t/a">>}})),
-    ?assertMatch({ok, #{<<"y">> := 0}}, emqx_rule_sqltester:test(
-                    #{<<"rawsql">> => Sql,
-                      <<"ctx">> => #{<<"payload">> => <<"{\"x\": 0}">>,
-                                     <<"topic">> => <<"t/a">>}})),
-    ?assertMatch({ok, #{<<"y">> := 0}}, emqx_rule_sqltester:test(
-                    #{<<"rawsql">> => Sql,
-                      <<"ctx">> => #{<<"payload">> => <<"{\"x\": -1}">>,
-                                     <<"topic">> => <<"t/a">>}})),
-    ?assertMatch({ok, #{<<"y">> := 7}}, emqx_rule_sqltester:test(
-                    #{<<"rawsql">> => Sql,
-                      <<"ctx">> => #{<<"payload">> => <<"{\"x\": 7}">>,
-                                     <<"topic">> => <<"t/a">>}})),
-    ?assertMatch({ok, #{<<"y">> := 7}}, emqx_rule_sqltester:test(
-                    #{<<"rawsql">> => Sql,
-                      <<"ctx">> => #{<<"payload">> => <<"{\"x\": 8}">>,
-                                     <<"topic">> => <<"t/a">>}})),
-    ok.
-
-t_sqlparse_case_when_2(_Config) ->
-    % switch clause
-    Sql = "select "
-          "  case payload.x when 1 then 2 "
-          "                 when 2 then 3 "
-          "                 else 4 "
-          "  end as y "
-          "from \"t/#\" ",
-    ?assertMatch({ok, #{<<"y">> := 2}}, emqx_rule_sqltester:test(
-                    #{<<"rawsql">> => Sql,
-                      <<"ctx">> => #{<<"payload">> => <<"{\"x\": 1}">>,
-                                     <<"topic">> => <<"t/a">>}})),
-    ?assertMatch({ok, #{<<"y">> := 3}}, emqx_rule_sqltester:test(
-                    #{<<"rawsql">> => Sql,
-                      <<"ctx">> => #{<<"payload">> => <<"{\"x\": 2}">>,
-                                     <<"topic">> => <<"t/a">>}})),
-    ?assertMatch({ok, #{<<"y">> := 4}}, emqx_rule_sqltester:test(
-                    #{<<"rawsql">> => Sql,
-                      <<"ctx">> => #{<<"payload">> => <<"{\"x\": 4}">>,
-                                     <<"topic">> => <<"t/a">>}})),
-    ?assertMatch({ok, #{<<"y">> := 4}}, emqx_rule_sqltester:test(
-                    #{<<"rawsql">> => Sql,
-                      <<"ctx">> => #{<<"payload">> => <<"{\"x\": 7}">>,
-                                     <<"topic">> => <<"t/a">>}})),
-    ?assertMatch({ok, #{<<"y">> := 4}}, emqx_rule_sqltester:test(
-                    #{<<"rawsql">> => Sql,
-                      <<"ctx">> => #{<<"payload">> => <<"{\"x\": 8}">>,
-                                     <<"topic">> => <<"t/a">>}})).
-
-t_sqlparse_case_when_3(_Config) ->
-    %% case-when clause
-    Sql = "select "
-          "  case when payload.x < 0 then 0 "
-          "       when payload.x > 7 then 7 "
-          "  end as y "
-          "from \"t/#\" ",
-    ?assertMatch({ok, #{}}, emqx_rule_sqltester:test(
-                    #{<<"rawsql">> => Sql,
-                      <<"ctx">> => #{<<"payload">> => <<"{\"x\": 1}">>,
-                                     <<"topic">> => <<"t/a">>}})),
-    ?assertMatch({ok, #{}}, emqx_rule_sqltester:test(
-                    #{<<"rawsql">> => Sql,
-                      <<"ctx">> => #{<<"payload">> => <<"{\"x\": 5}">>,
-                                     <<"topic">> => <<"t/a">>}})),
-    ?assertMatch({ok, #{}}, emqx_rule_sqltester:test(
-                    #{<<"rawsql">> => Sql,
-                      <<"ctx">> => #{<<"payload">> => <<"{\"x\": 0}">>,
-                                     <<"topic">> => <<"t/a">>}})),
-    ?assertMatch({ok, #{<<"y">> := 0}}, emqx_rule_sqltester:test(
-                    #{<<"rawsql">> => Sql,
-                      <<"ctx">> => #{<<"payload">> => <<"{\"x\": -1}">>,
-                                     <<"topic">> => <<"t/a">>}})),
-    ?assertMatch({ok, #{}}, emqx_rule_sqltester:test(
-                    #{<<"rawsql">> => Sql,
-                      <<"ctx">> => #{<<"payload">> => <<"{\"x\": 7}">>,
-                                     <<"topic">> => <<"t/a">>}})),
-    ?assertMatch({ok, #{<<"y">> := 7}}, emqx_rule_sqltester:test(
-                    #{<<"rawsql">> => Sql,
-                      <<"ctx">> => #{<<"payload">> => <<"{\"x\": 8}">>,
-                                     <<"topic">> => <<"t/a">>}})),
-    ok.
-
-t_sqlparse_array_index_1(_Config) ->
-    %% index get
-    Sql = "select "
-          "  json_decode(payload) as p, "
-          "  p[1] as a "
-          "from \"t/#\" ",
-    ?assertMatch({ok, #{<<"a">> := #{<<"x">> := 1}}}, emqx_rule_sqltester:test(
-                    #{<<"rawsql">> => Sql,
-                      <<"ctx">> => #{<<"payload">> => <<"[{\"x\": 1}]">>,
-                                     <<"topic">> => <<"t/a">>}})),
-    ?assertMatch({ok, #{}}, emqx_rule_sqltester:test(
-                    #{<<"rawsql">> => Sql,
-                      <<"ctx">> => #{<<"payload">> => <<"{\"x\": 1}">>,
-                                     <<"topic">> => <<"t/a">>}})),
-    %% index get without 'as'
-    Sql2 = "select "
-           "  payload.x[2] "
-           "from \"t/#\" ",
-    ?assertMatch({ok, #{<<"payload">> := #{<<"x">> := [3]}}}, emqx_rule_sqltester:test(
-                    #{<<"rawsql">> => Sql2,
-                      <<"ctx">> => #{<<"payload">> => #{<<"x">> => [1,3,4]},
-                                     <<"topic">> => <<"t/a">>}})),
-    %% index get without 'as' again
-    Sql3 = "select "
-           "  payload.x[2].y "
-           "from \"t/#\" ",
-    ?assertMatch( {ok, #{<<"payload">> := #{<<"x">> := [#{<<"y">> := 3}]}}}
-                , emqx_rule_sqltester:test(
-                    #{<<"rawsql">> => Sql3,
-                      <<"ctx">> => #{<<"payload">> => #{<<"x">> => [1,#{y => 3},4]},
-                                     <<"topic">> => <<"t/a">>}})
-                ),
-
-    %% index get with 'as'
-    Sql4 = "select "
-           "  payload.x[2].y as b "
-           "from \"t/#\" ",
-    ?assertMatch({ok, #{<<"b">> := 3}}, emqx_rule_sqltester:test(
-                    #{<<"rawsql">> => Sql4,
-                      <<"ctx">> => #{<<"payload">> => #{<<"x">> => [1,#{y => 3},4]},
-                                     <<"topic">> => <<"t/a">>}})).
-
-t_sqlparse_array_index_2(_Config) ->
-    %% array get with negative index
-    Sql1 = "select "
-           "  payload.x[-2].y as b "
-           "from \"t/#\" ",
-    ?assertMatch({ok, #{<<"b">> := 3}}, emqx_rule_sqltester:test(
-                    #{<<"rawsql">> => Sql1,
-                      <<"ctx">> => #{<<"payload">> => #{<<"x">> => [1,#{y => 3},4]},
-                                     <<"topic">> => <<"t/a">>}})),
-    %% array append to head or tail of a list:
-    Sql2 = "select "
-           "  payload.x as b, "
-           "  1 as c[-0], "
-           "  2 as c[-0], "
-           "  b as c[0] "
-           "from \"t/#\" ",
-    ?assertMatch({ok, #{<<"b">> := 0, <<"c">> := [0,1,2]}}, emqx_rule_sqltester:test(
-                    #{<<"rawsql">> => Sql2,
-                      <<"ctx">> => #{<<"payload">> => #{<<"x">> => 0},
-                                     <<"topic">> => <<"t/a">>}})),
-    %% construct an empty list:
-    Sql3 = "select "
-           "  [] as c, "
-           "  1 as c[-0], "
-           "  2 as c[-0], "
-           "  0 as c[0] "
-           "from \"t/#\" ",
-    ?assertMatch({ok, #{<<"c">> := [0,1,2]}}, emqx_rule_sqltester:test(
-                    #{<<"rawsql">> => Sql3,
-                      <<"ctx">> => #{<<"payload">> => <<"">>,
-                                     <<"topic">> => <<"t/a">>}})),
-    %% construct a list:
-    Sql4 = "select "
-           "  [payload.a, \"topic\", 'c'] as c, "
-           "  1 as c[-0], "
-           "  2 as c[-0], "
-           "  0 as c[0] "
-           "from \"t/#\" ",
-    ?assertMatch({ok, #{<<"c">> := [0,11,<<"t/a">>,<<"c">>,1,2]}}, emqx_rule_sqltester:test(
-                    #{<<"rawsql">> => Sql4,
-                      <<"ctx">> => #{<<"payload">> => <<"{\"a\":11}">>,
-                                     <<"topic">> => <<"t/a">>
-                                     }})).
-
-t_sqlparse_array_index_3(_Config) ->
-    %% array with json string payload:
-    Sql0 = "select "
-           "payload,"
-           "payload.x[2].y "
-           "from \"t/#\" ",
-    ?assertMatch({ok, #{<<"payload">> := #{<<"x">> := [1, #{<<"y">> := [1,2]}, 3]}}},
-            emqx_rule_sqltester:test(
-                    #{<<"rawsql">> => Sql0,
-                      <<"ctx">> => #{<<"payload">> => <<"{\"x\": [1,{\"y\": [1,2]},3]}">>,
-                                     <<"topic">> => <<"t/a">>}})),
-    %% same as above but don't select payload:
-    Sql1 = "select "
-           "payload.x[2].y as b "
-           "from \"t/#\" ",
-    ?assertMatch({ok, #{<<"b">> := [1,2]}}, emqx_rule_sqltester:test(
-                    #{<<"rawsql">> => Sql1,
-                      <<"ctx">> => #{<<"payload">> => <<"{\"x\": [1,{\"y\": [1,2]},3]}">>,
-                                     <<"topic">> => <<"t/a">>}})),
-    %% same as above but add 'as' clause:
-    Sql2 = "select "
-           "payload.x[2].y as b.c "
-           "from \"t/#\" ",
-    ?assertMatch({ok, #{<<"b">> := #{<<"c">> := [1,2]}}}, emqx_rule_sqltester:test(
-                    #{<<"rawsql">> => Sql2,
-                      <<"ctx">> => #{<<"payload">> => <<"{\"x\": [1,{\"y\": [1,2]},3]}">>,
-                                     <<"topic">> => <<"t/a">>}})).
-
-t_sqlparse_array_index_4(_Config) ->
-    %% array with json string payload:
-    Sql0 = "select "
-           "0 as payload.x[2].y "
-           "from \"t/#\" ",
-    ?assertMatch({ok, #{<<"payload">> := #{<<"x">> := [#{<<"y">> := 0}]}}},
-            emqx_rule_sqltester:test(
-                    #{<<"rawsql">> => Sql0,
-                      <<"ctx">> => #{<<"payload">> => <<"{\"x\": [1,{\"y\": [1,2]},3]}">>,
-                                     <<"topic">> => <<"t/a">>}})),
-    %% array with json string payload, and also select payload.x:
-    Sql1 = "select "
-           "payload.x, "
-           "0 as payload.x[2].y "
-           "from \"t/#\" ",
-    ?assertMatch({ok, #{<<"payload">> := #{<<"x">> := [1, #{<<"y">> := 0}, 3]}}},
-            emqx_rule_sqltester:test(
-                    #{<<"rawsql">> => Sql1,
-                      <<"ctx">> => #{<<"payload">> => <<"{\"x\": [1,{\"y\": [1,2]},3]}">>,
-                                     <<"topic">> => <<"t/a">>}})).
-
-t_sqlparse_array_index_5(_Config) ->
-    Sql00 = "select "
-            "  [1,2,3,4] "
-            "from \"t/#\" ",
-    {ok, Res00} =
-        emqx_rule_sqltester:test(
-                    #{<<"rawsql">> => Sql00,
-                      <<"ctx">> => #{<<"payload">> => <<"">>,
-                                     <<"topic">> => <<"t/a">>}}),
-    ?assert(lists:any(fun({_K, V}) ->
-            V =:= [1,2,3,4]
-        end, maps:to_list(Res00))).
-
-t_sqlparse_select_matadata_1(_Config) ->
-    %% array with json string payload:
-    Sql0 = "select "
-           "payload "
-           "from \"t/#\" ",
-    ?assertNotMatch({ok, #{<<"payload">> := <<"abc">>, metadata := _}},
-            emqx_rule_sqltester:test(
-                    #{<<"rawsql">> => Sql0,
-                      <<"ctx">> => #{<<"payload">> => <<"abc">>,
-                                     <<"topic">> => <<"t/a">>}})),
-    Sql1 = "select "
-           "payload, metadata "
-           "from \"t/#\" ",
-    ?assertMatch({ok, #{<<"payload">> := <<"abc">>, <<"metadata">> := _}},
-            emqx_rule_sqltester:test(
-                    #{<<"rawsql">> => Sql1,
-                      <<"ctx">> => #{<<"payload">> => <<"abc">>,
-                                     <<"topic">> => <<"t/a">>}})).
-
-t_sqlparse_array_range_1(_Config) ->
-    %% get a range of list
-    Sql0 = "select "
-           "  payload.a[1..4] as c "
-           "from \"t/#\" ",
-    ?assertMatch({ok, #{<<"c">> := [0,1,2,3]}}, emqx_rule_sqltester:test(
-                    #{<<"rawsql">> => Sql0,
-                      <<"ctx">> => #{<<"payload">> => <<"{\"a\":[0,1,2,3,4,5]}">>,
-                                     <<"topic">> => <<"t/a">>}})),
-    %% get a range from non-list data
-    Sql02 = "select "
-           "  payload.a[1..4] as c "
-           "from \"t/#\" ",
-    ?assertThrow({select_and_transform_error, {error,{range_get,non_list_data},_}},
-        emqx_rule_sqltester:test(
-            #{<<"rawsql">> => Sql02,
-                <<"ctx">> =>
-                    #{<<"payload">> => <<"{\"x\":[0,1,2,3,4,5]}">>,
-                      <<"topic">> => <<"t/a">>}})),
-    %% construct a range:
-    Sql1 = "select "
-           "  [1..4] as c, "
-           "  5 as c[-0], "
-           "  6 as c[-0], "
-           "  0 as c[0] "
-           "from \"t/#\" ",
-    ?assertMatch({ok, #{<<"c">> := [0,1,2,3,4,5,6]}}, emqx_rule_sqltester:test(
-                    #{<<"rawsql">> => Sql1,
-                      <<"ctx">> => #{<<"payload">> => <<"">>,
-                                     <<"topic">> => <<"t/a">>}})).
-
-t_sqlparse_array_range_2(_Config) ->
-    %% construct a range without 'as'
-    Sql00 = "select "
-            "  [1..4] "
-            "from \"t/#\" ",
-    {ok, Res00} =
-        emqx_rule_sqltester:test(
-                    #{<<"rawsql">> => Sql00,
-                      <<"ctx">> => #{<<"payload">> => <<"">>,
-                                     <<"topic">> => <<"t/a">>}}),
-    ?assert(lists:any(fun({_K, V}) ->
-            V =:= [1,2,3,4]
-        end, maps:to_list(Res00))),
-    %% construct a range without 'as'
-    Sql01 = "select "
-            "  a[2..4] "
-            "from \"t/#\" ",
-    ?assertMatch({ok, #{<<"a">> := [2,3,4]}},
-        emqx_rule_sqltester:test(
-                    #{<<"rawsql">> => Sql01,
-                      <<"ctx">> => #{<<"a">> => [1,2,3,4,5],
-                                     <<"topic">> => <<"t/a">>}})),
-    %% get a range of list without 'as'
-    Sql02 = "select "
-           "  payload.a[1..4] "
-           "from \"t/#\" ",
-    ?assertMatch({ok, #{<<"payload">> := #{<<"a">> := [0,1,2,3]}}}, emqx_rule_sqltester:test(
-                    #{<<"rawsql">> => Sql02,
-                      <<"ctx">> => #{<<"payload">> => <<"{\"a\":[0,1,2,3,4,5]}">>,
-                                     <<"topic">> => <<"t/a">>}})).
-
-t_sqlparse_true_false(_Config) ->
-    %% construct a range without 'as'
-    Sql00 = "select "
-            " true as a, false as b, "
-            " false as x.y, true as c[-0] "
-            "from \"t/#\" ",
-    {ok, Res00} =
-        emqx_rule_sqltester:test(
-                    #{<<"rawsql">> => Sql00,
-                      <<"ctx">> => #{<<"payload">> => <<"">>,
-                                     <<"topic">> => <<"t/a">>}}),
-    ?assertMatch(#{<<"a">> := true, <<"b">> := false,
-                   <<"x">> := #{<<"y">> := false},
-                   <<"c">> := [true]
-                   }, Res00).
-
-t_sqlparse_new_map(_Config) ->
-    %% construct a range without 'as'
-    Sql00 = "select "
-            " map_new() as a, map_new() as b, "
-            " map_new() as x.y, map_new() as c[-0] "
-            "from \"t/#\" ",
-    {ok, Res00} =
-        emqx_rule_sqltester:test(
-                    #{<<"rawsql">> => Sql00,
-                      <<"ctx">> => #{<<"payload">> => <<"">>,
-                                     <<"topic">> => <<"t/a">>}}),
-    ?assertMatch(#{<<"a">> := #{}, <<"b">> := #{},
-                   <<"x">> := #{<<"y">> := #{}},
-                   <<"c">> := [#{}]
-                   }, Res00).
-
 t_sqlparse_payload_as(_Config) ->
     %% https://github.com/emqx/emqx/issues/3866
     Sql00 = "SELECT "
@@ -2441,20 +1622,6 @@ make_simple_rule(RuleId, SQL, ForTopics) when is_binary(RuleId) ->
           actions = [{'inspect', #{}}],
           description = <<"simple rule">>}.
 
-create_simple_repub_rule(TargetTopic, SQL) ->
-    create_simple_repub_rule(TargetTopic, SQL, <<"${payload}">>).
-
-create_simple_repub_rule(TargetTopic, SQL, Template) ->
-    {ok, Rule} = emqx_rule_engine:create_rule(
-                    #{rawsql => SQL,
-                      actions => [#{name => 'republish',
-                                    args => #{<<"target_topic">> => TargetTopic,
-                                              <<"target_qos">> => -1,
-                                              <<"payload_tmpl">> => Template}
-                                    }],
-                      description => <<"simple repub rule">>}),
-    Rule.
-
 make_simple_action(ActionName) when is_atom(ActionName) ->
     #action{name = ActionName, app = ?APP,
             module = ?MODULE, on_create = simple_action_inspect, params_spec = #{},
@@ -2476,19 +1643,6 @@ make_simple_resource(ResId) ->
               type = simple_resource_type,
               config = #{},
               description = <<"Simple Resource">>}.
-
-make_simple_resource_type(ResTypeName) ->
-    #resource_type{name = ResTypeName, provider = ?APP,
-                   params_spec = #{},
-                   on_create = {?MODULE, on_simple_resource_type_create},
-                   on_destroy = {?MODULE, on_simple_resource_type_destroy},
-                   on_status = {?MODULE, on_simple_resource_type_status},
-                   title = #{en => <<"Simple Resource Type">>},
-                   description = #{en => <<"Simple Resource Type">>}}.
-
-on_simple_resource_type_create(_Id, #{}) -> #{}.
-on_simple_resource_type_destroy(_Id, #{}) -> ok.
-on_simple_resource_type_status(_Id, #{}, #{}) -> #{is_alive => true}.
 
 hook_metrics_action(_Id, _Params) ->
     fun(Data = #{event := EventName}, _Envs) ->
@@ -2780,65 +1934,9 @@ verify_peername(PeerName) ->
 verify_ipaddr(IPAddrS) ->
     ?assertMatch({ok, _}, inet:parse_address(binary_to_list(IPAddrS))).
 
-init_events_counters() ->
-    ets:new(events_record_tab, [named_table, bag, public]).
-
 %%------------------------------------------------------------------------------
-%% Start Apps
+%% Mock funcs
 %%------------------------------------------------------------------------------
-
-stop_apps() ->
-    stopped = mnesia:stop(),
-    [application:stop(App) || App <- [emqx_rule_engine, emqx]].
-
-start_apps() ->
-    [start_apps(App, SchemaFile, ConfigFile) ||
-        {App, SchemaFile, ConfigFile}
-            <- [{emqx, deps_path(emqx, "priv/emqx.schema"),
-                       deps_path(emqx, "etc/emqx.conf")},
-                {emqx_rule_engine, local_path("priv/emqx_rule_engine.schema"),
-                                   local_path("etc/emqx_rule_engine.conf")}]].
-
-start_apps(App, SchemaFile, ConfigFile) ->
-    read_schema_configs(App, SchemaFile, ConfigFile),
-    set_special_configs(App),
-    {ok, _} = application:ensure_all_started(App).
-
-read_schema_configs(App, SchemaFile, ConfigFile) ->
-    ct:pal("Read configs - SchemaFile: ~p, ConfigFile: ~p", [SchemaFile, ConfigFile]),
-    Schema = cuttlefish_schema:files([SchemaFile]),
-    Conf = conf_parse:file(ConfigFile),
-    NewConfig = cuttlefish_generator:map(Schema, Conf),
-    Vals = proplists:get_value(App, NewConfig, []),
-    [application:set_env(App, Par, Value) || {Par, Value} <- Vals].
-
-deps_path(App, RelativePath) ->
-    %% Note: not lib_dir because etc dir is not sym-link-ed to _build dir
-    %% but priv dir is
-    Path0 = code:priv_dir(App),
-    Path = case file:read_link(Path0) of
-               {ok, Resolved} -> Resolved;
-               {error, _} -> Path0
-           end,
-    filename:join([Path, "..", RelativePath]).
-
-local_path(RelativePath) ->
-    deps_path(emqx_rule_engine, RelativePath).
-
-set_special_configs(emqx_rule_engine) ->
-    application:set_env(emqx_rule_engine, ignore_sys_message, true),
-    application:set_env(emqx_rule_engine, events,
-                       [{'client.connected',on,1},
-                        {'client.disconnected',on,1},
-                        {'session.subscribed',on,1},
-                        {'session.unsubscribed',on,1},
-                        {'message.acked',on,1},
-                        {'message.dropped',on,1},
-                        {'message.delivered',on,1}
-                       ]),
-    ok;
-set_special_configs(_App) ->
-    ok.
 
 mock_print() ->
     catch meck:unload(emqx_ctl),

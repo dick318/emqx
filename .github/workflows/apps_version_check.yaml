@@ -3,10 +3,41 @@ name: Check Apps Version
 on: [pull_request]
 
 jobs:
-  check_apps_version:
+  check_apps_version_4_x:
     runs-on: ubuntu-20.04
 
+    strategy:
+      matrix:
+        erl_otp:
+        - erl23.3.4.9-3
+        os:
+        - ubuntu20.04
+
+    container: emqx/build-env:${{ matrix.erl_otp }}-${{ matrix.os }}
+
     steps:
-      - uses: actions/checkout@v1
+      - uses: actions/checkout@v2
+        with:
+          fetch-depth: 0 # need full history
+      - name: fix-git-unsafe-repository
+        run: git config --global --add safe.directory /__w/emqx/emqx
+      - name: Check relup (ce)
+        if: endsWith(github.repository, 'emqx')
+        run: ./scripts/update-appup.sh emqx --check
+      - name: Check relup (ee)
+        if: endsWith(github.repository, 'enterprise')
+        run: ./scripts/update-appup.sh emqx-ee --check
       - name: Check apps version
-        run: ./scripts/apps-version-check.sh
+        run: ./scripts/check-apps-vsn.sh
+      - name: Check chart versions
+        run: ./scripts/check-chart-vsn.sh
+      - uses: actions/upload-artifact@v3.1.0
+        if: failure()
+        with:
+          name: expected_appup_files
+          path: |
+            apps/*/src/*.appup.src
+            src/*.appup.src
+            lib-ce/*/src/*.appup.src
+            lib-ee/*/src/*.appup.src
+          retention-days: 1

@@ -40,6 +40,8 @@ Parameter  | Description | Default Value
 `image.pullPolicy`  | The image pull policy  | `IfNotPresent`
 `image.pullSecrets `  | The image pull secrets (does not add image pull secrets to deployed pods)  |``[]``
 `recreatePods` | Forces the recreation of pods during upgrades, which can be useful to always apply the most recent configuration. | `false`
+`podAnnotations ` | Annotations for pod | `{}`
+`podManagementPolicy`| To redeploy a chart with existing PVC(s), the value must be set to Parallel to avoid deadlock | `Parallel`
 `persistence.enabled` | Enable EMQX persistence using PVC | `false`
 `persistence.storageClass` | Storage class of backing PVC (uses alpha storage class annotation) | `nil`
 `persistence.existingClaim` | EMQX data Persistent Volume existing claim name, evaluated as a template | `""`
@@ -70,21 +72,26 @@ Parameter  | Description | Default Value
 `ingress.dashboard.enabled` |	Enable ingress for EMQX Dashboard |	false
 `ingress.dashboard.ingressClassName` |	Set the ingress class for EMQX Dashboard
 `ingress.dashboard.path` | Ingress path for EMQX Dashboard |	`/`
+`ingress.dashboard.pathType` | Ingress pathType for EMQX Dashboard |	`ImplementationSpecific`
 `ingress.dashboard.hosts` | Ingress hosts for EMQX Mgmt API |	dashboard.emqx.local
 `ingress.dashboard.tls` | Ingress tls for EMQX Mgmt API |	`[]`
 `ingress.dashboard.annotations` | Ingress annotations for EMQX Mgmt API |	`{}`
 `ingress.mgmt.enabled` |	Enable ingress for EMQX Mgmt API |	`false`
 `ingress.mqtt.ingressClassName` |	Set the ingress class for EMQX Mgmt API | `nil`
 `ingress.mgmt.path` | Ingress path for EMQX Mgmt API | `/`
+`ingress.mgmt.pathType` | Ingress pathType for EMQX Mgmt API |	`ImplementationSpecific`
 `ingress.mgmt.hosts` | Ingress hosts for EMQX Mgmt API |	`api.emqx.local`
 `ingress.mgmt.tls` | Ingress tls for EMQX Mgmt API |	`[]`
 `ingress.mgmt.annotations` | Ingress annotations for EMQX Mgmt API |	`{}`
 `ingress.wss.enabled` |	Enable ingress for EMQX Mgmt API |	`false`
 `ingress.wss.ingressClassName` |	Set the ingress class for EMQX Mgmt API | `nil`
 `ingress.wss.path` | Ingress path for EMQX WSS |	`/`
+`ingress.wss.pathType` | Ingress pathType for EMQX WSS |	`ImplementationSpecific`
 `ingress.wss.hosts` | Ingress hosts for EMQX WSS |    `wss.emqx.local`
 `ingress.wss.tls` | Ingress tls for EMQX WSS |	`[]`
 `ingress.wss.annotations` | Ingress annotations for EMQX WSS |	`{}`
+| `metrics.enable` | If set to true, [prometheus-operator](https://github.com/prometheus-operator/prometheus-operator) needs to be installed, and [emqx_prometheus](https://github.com/emqx/emqx/tree/main-v4.4/apps/emqx_prometheus) needs to enable | false |
+| `metrics.type` | Now we only supported "prometheus" | "prometheus" |
 `extraEnv` | Aditional container env vars | `[]`
 `extraEnvFrom` | Aditional container env from vars (eg. [config map](https://kubernetes.io/docs/tasks/configure-pod-container/configure-pod-configmap/), [secrets](https://kubernetes.io/docs/concepts/configuration/secret/) | `[]`
 `extraArgs` | Additional container executable arguments | `[]`
@@ -122,6 +129,7 @@ ingress:
       nginx.ingress.kubernetes.io/use-proxy-protocol: "false"
       nginx.ingress.kubernetes.io/proxy-protocol-header-timeout: "5s"
     path: /mqtt
+    pathType: ImplementationSpecific
     hosts:
     - myhost.example.com
     tls:

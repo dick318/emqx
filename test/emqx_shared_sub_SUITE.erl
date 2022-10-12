@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2018-2021 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2018-2022 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -35,39 +35,63 @@
 all() -> emqx_ct:all(?SUITE).
 
 init_per_suite(Config) ->
+    net_kernel:start(['master@127.0.0.1', longnames]),
     emqx_ct_helpers:boot_modules(all),
+    PortDiscovery = application:get_env(gen_rpc, port_discovery),
+    application:set_env(gen_rpc, port_discovery, stateless),
+    application:ensure_all_started(gen_rpc),
+    %% ensure emqx_moduels' app modules are loaded
+    %% so the mnesia tables are created
+    ok = load_app(emqx_modules),
     emqx_ct_helpers:start_apps([]),
-    Config.
+    [{port_discovery, PortDiscovery} | Config].
 
-end_per_suite(_Config) ->
-    emqx_ct_helpers:stop_apps([]).
+end_per_suite(Config) ->
+    emqx_ct_helpers:stop_apps([gen_rpc]),
+    case proplists:get_value(port_discovery, Config) of
+      {ok, OldValue} -> application:set_env(gen_rpc, port_discovery, OldValue);
+      _ -> ok
+    end.
 
-t_is_ack_required(_) ->
+init_per_testcase(Case, Config) ->
+    try
+        ?MODULE:Case({'init', Config})
+    catch
+        error : function_clause ->
+            Config
+    end.
+
+end_per_testcase(Case, Config) ->
+    try
+        ?MODULE:Case({'end', Config})
+    catch
+        error : function_clause ->
+            ok
+    end.
+
+t_is_ack_required(Config) when is_list(Config) ->
     ?assertEqual(false, emqx_shared_sub:is_ack_required(#message{headers = #{}})).
 
-t_maybe_nack_dropped(_) ->
-    ?assertEqual(ok, emqx_shared_sub:maybe_nack_dropped(#message{headers = #{}})),
-    Msg = #message{headers = #{shared_dispatch_ack => {self(), for_test}}},
-    ?assertEqual(ok, emqx_shared_sub:maybe_nack_dropped(Msg)),
+t_maybe_nack_dropped(Config) when is_list(Config) ->
+    ?assertEqual(store, emqx_shared_sub:maybe_nack_dropped(#message{headers = #{}})),
+    Msg = #message{headers = #{shared_dispatch_ack => {self(), {fresh, <<"group">>, for_test}}}},
+    ?assertEqual(drop, emqx_shared_sub:maybe_nack_dropped(Msg)),
     ?assertEqual(ok,receive {for_test, {shared_sub_nack, dropped}} -> ok after 100 -> timeout end).
 
-t_nack_no_connection(_) ->
-    Msg = #message{headers = #{shared_dispatch_ack => {self(), for_test}}},
+t_nack_no_connection(Config) when is_list(Config) ->
+    Msg = #message{headers = #{shared_dispatch_ack => {self(), {fresh, <<"group">>, for_test}}}},
     ?assertEqual(ok, emqx_shared_sub:nack_no_connection(Msg)),
     ?assertEqual(ok,receive {for_test, {shared_sub_nack, no_connection}} -> ok
                     after 100 -> timeout end).
 
-t_maybe_ack(_) ->
+t_maybe_ack(Config) when is_list(Config) ->
     ?assertEqual(#message{headers = #{}}, emqx_shared_sub:maybe_ack(#message{headers = #{}})),
-    Msg = #message{headers = #{shared_dispatch_ack => {self(), for_test}}},
+    Msg = #message{headers = #{shared_dispatch_ack => {self(), {fresh, <<"group">>, for_test}}}},
     ?assertEqual(#message{headers = #{shared_dispatch_ack => ?no_ack}},
                  emqx_shared_sub:maybe_ack(Msg)),
     ?assertEqual(ok,receive {for_test, ?ack} -> ok after 100 -> timeout end).
 
-% t_subscribers(_) ->
-%     error('TODO').
-
-t_random_basic(_) ->
+t_random_basic(Config) when is_list(Config) ->
     ok = ensure_config(random),
     ClientId = <<"ClientId">>,
     Topic = <<"foo">>,
@@ -97,7 +121,7 @@ t_random_basic(_) ->
 %% After the connection for the 2nd session is also closed,
 %% i.e. when all clients are offline, the following message(s)
 %% should be delivered randomly.
-t_no_connection_nack(_) ->
+t_no_connection_nack(Config) when is_list(Config) ->
     ok = ensure_config(sticky),
     Publisher = <<"publisher">>,
     Subscriber1 = <<"Subscriber1">>,
@@ -109,9 +133,9 @@ t_no_connection_nack(_) ->
 
     ExpProp = [{properties, #{'Session-Expiry-Interval' => timer:seconds(30)}}],
     {ok, SubConnPid1} = emqtt:start_link([{clientid, Subscriber1}] ++ ExpProp),
-    {ok, _Props} = emqtt:connect(SubConnPid1),
+    {ok, _} = emqtt:connect(SubConnPid1),
     {ok, SubConnPid2} = emqtt:start_link([{clientid, Subscriber2}] ++ ExpProp),
-    {ok, _Props} = emqtt:connect(SubConnPid2),
+    {ok, _} = emqtt:connect(SubConnPid2),
     emqtt:subscribe(SubConnPid1, ShareTopic, QoS),
     emqtt:subscribe(SubConnPid1, ShareTopic, QoS),
 
@@ -125,7 +149,7 @@ t_no_connection_nack(_) ->
                 emqx:publish(M#message{id = PacketId})
             end,
     SendF(1),
-    timer:sleep(200),
+    ct:sleep(200),
     %% This is the connection which was picked by broker to dispatch (sticky) for 1st message
 
     ?assertMatch([#{packet_id := 1}], recv_msgs(1)),
@@ -163,22 +187,27 @@ t_no_connection_nack(_) ->
     %   emqx_sm:close_session(SPid2),
     ok.
 
-t_random(_) ->
+t_random(Config) when is_list(Config) ->
+    ok = ensure_config(random, true),
     test_two_messages(random).
 
-t_round_robin(_) ->
+t_round_robin(Config) when is_list(Config) ->
+    ok = ensure_config(round_robin, true),
     test_two_messages(round_robin).
 
-t_sticky(_) ->
+t_sticky(Config) when is_list(Config) ->
+    ok = ensure_config(sticky, true),
     test_two_messages(sticky).
 
-t_hash(_) ->
-    test_two_messages(hash, false).
+t_hash(Config) when is_list(Config) ->
+    ok = ensure_config(hash, false),
+    test_two_messages(hash).
 
-t_hash_clinetid(_) ->
-    test_two_messages(hash_clientid, false).
+t_hash_clinetid(Config) when is_list(Config) ->
+    ok = ensure_config(hash_clientid, false),
+    test_two_messages(hash_clientid).
 
-t_hash_topic(_) ->
+t_hash_topic(Config) when is_list(Config) ->
     ok = ensure_config(hash_topic, false),
     ClientId1 = <<"ClientId1">>,
     ClientId2 = <<"ClientId2">>,
@@ -217,7 +246,7 @@ t_hash_topic(_) ->
     ok.
 
 %% if the original subscriber dies, change to another one alive
-t_not_so_sticky(_) ->
+t_not_so_sticky(Config) when is_list(Config) ->
     ok = ensure_config(sticky),
     ClientId1 = <<"ClientId1">>,
     ClientId2 = <<"ClientId2">>,
@@ -242,59 +271,55 @@ t_not_so_sticky(_) ->
     ok.
 
 test_two_messages(Strategy) ->
-    test_two_messages(Strategy, _WithAck = true).
+    test_two_messages(Strategy, <<"group1">>).
 
-test_two_messages(Strategy, WithAck) ->
-    ok = ensure_config(Strategy, WithAck),
+test_two_messages(Strategy, Group) ->
     Topic = <<"foo/bar">>,
     ClientId1 = <<"ClientId1">>,
     ClientId2 = <<"ClientId2">>,
     {ok, ConnPid1} = emqtt:start_link([{clientid, ClientId1}]),
-    {ok, _} = emqtt:connect(ConnPid1),
     {ok, ConnPid2} = emqtt:start_link([{clientid, ClientId2}]),
+    {ok, _} = emqtt:connect(ConnPid1),
     {ok, _} = emqtt:connect(ConnPid2),
+
+    emqtt:subscribe(ConnPid1, {<<"$share/", Group/binary, "/foo/bar">>, 0}),
+    emqtt:subscribe(ConnPid2, {<<"$share/", Group/binary, "/foo/bar">>, 0}),
 
     Message1 = emqx_message:make(ClientId1, 0, Topic, <<"hello1">>),
     Message2 = emqx_message:make(ClientId1, 0, Topic, <<"hello2">>),
-    emqtt:subscribe(ConnPid1, {<<"$share/group1/foo/bar">>, 0}),
-    emqtt:subscribe(ConnPid2, {<<"$share/group1/foo/bar">>, 0}),
     ct:sleep(100),
+
     emqx:publish(Message1),
-    Me = self(),
-    WaitF = fun(ExpectedPayload) ->
-                    case last_message(ExpectedPayload, [ConnPid1, ConnPid2]) of
-                        {true, Pid} ->
-                            Me ! {subscriber, Pid},
-                            true;
-                        Other ->
-                            Other
-                    end
-            end,
-    WaitF(<<"hello1">>),
-    UsedSubPid1 = receive {subscriber, P1} -> P1 end,
-    emqx_broker:publish(Message2),
-    WaitF(<<"hello2">>),
-    UsedSubPid2 = receive {subscriber, P2} -> P2 end,
-    case Strategy of
-        sticky -> ?assert(UsedSubPid1 =:= UsedSubPid2);
-        round_robin -> ?assert(UsedSubPid1 =/= UsedSubPid2);
-        hash -> ?assert(UsedSubPid1 =:= UsedSubPid2);
-        _ -> ok
-    end,
+    {true, UsedSubPid1} = last_message(<<"hello1">>, [ConnPid1, ConnPid2]),
+
+    emqx:publish(Message2),
+    {true, UsedSubPid2} = last_message(<<"hello2">>, [ConnPid1, ConnPid2]),
+
     emqtt:stop(ConnPid1),
     emqtt:stop(ConnPid2),
+
+    case Strategy of
+        sticky -> ?assertEqual(UsedSubPid1, UsedSubPid2);
+        round_robin -> ?assertNotEqual(UsedSubPid1, UsedSubPid2);
+        hash -> ?assertEqual(UsedSubPid1, UsedSubPid2);
+        _ -> ok
+    end,
     ok.
 
 last_message(ExpectedPayload, Pids) ->
+    last_message(ExpectedPayload, Pids, 6000).
+
+last_message(ExpectedPayload, Pids, Timeout) ->
     receive
         {publish, #{client_pid := Pid, payload := ExpectedPayload}} ->
-            ct:pal("~p ====== ~p", [Pids, Pid]),
+            ct:pal("last_message: ~p ====== ~p, payload=~p", [Pids, Pid, ExpectedPayload]),
             {true, Pid}
-    after 100 ->
+    after Timeout ->
+        ct:pal("not yet"),
         <<"not yet?">>
     end.
 
-t_dispatch(_) ->
+t_dispatch(Config) when is_list(Config) ->
     ok = ensure_config(random),
     Topic = <<"foo">>,
     ?assertEqual({error, no_subscribers},
@@ -303,16 +328,198 @@ t_dispatch(_) ->
     ?assertEqual({ok, 1},
                  emqx_shared_sub:dispatch(<<"group1">>, Topic, #delivery{message = #message{}})).
 
-% t_unsubscribe(_) ->
-%     error('TODO').
-
-% t_subscribe(_) ->
-%     error('TODO').
-t_uncovered_func(_) ->
+t_uncovered_func(Config) when is_list(Config) ->
     ignored = gen_server:call(emqx_shared_sub, ignored),
     ok = gen_server:cast(emqx_shared_sub, ignored),
     ignored = emqx_shared_sub ! ignored,
     {mnesia_table_event, []} = emqx_shared_sub ! {mnesia_table_event, []}.
+
+t_per_group_config(Config) when is_list(Config) ->
+    ok = ensure_group_config(#{
+                               <<"local_group_fallback">> => local,
+                               <<"local_group">> => local,
+                               <<"round_robin_group">> => round_robin,
+                               <<"sticky_group">> => sticky
+                              }),
+    %% Each test is repeated 4 times because random strategy may technically pass the test
+    %% so we run 8 tests to make random pass in only 1/256 runs
+
+    test_two_messages(sticky, <<"sticky_group">>),
+    test_two_messages(sticky, <<"sticky_group">>),
+    test_two_messages(round_robin, <<"round_robin_group">>),
+    test_two_messages(round_robin, <<"round_robin_group">>),
+    test_two_messages(sticky, <<"sticky_group">>),
+    test_two_messages(sticky, <<"sticky_group">>),
+    test_two_messages(round_robin, <<"round_robin_group">>),
+    test_two_messages(round_robin, <<"round_robin_group">>).
+
+t_local({'init', Config}) ->
+    Node = start_slave(local_shared_sub_test19, 21884),
+    GroupConfig = #{
+                    <<"local_group_fallback">> => local,
+                    <<"local_group">> => local,
+                    <<"round_robin_group">> => round_robin,
+                    <<"sticky_group">> => sticky
+                   },
+    ok = ensure_group_config(Node, GroupConfig),
+    ok = ensure_group_config(GroupConfig),
+    [{slave_node, Node} | Config];
+t_local({'end', _Config}) ->
+    ok = stop_slave(local_shared_sub_test19);
+t_local(Config) when is_list(Config) ->
+    Node = proplists:get_value(slave_node, Config),
+    Topic = <<"local_foo1/bar">>,
+    ClientId1 = <<"ClientId1">>,
+    ClientId2 = <<"ClientId2">>,
+
+    {ok, ConnPid1} = emqtt:start_link([{clientid, ClientId1}, {port, 21884}]),
+    {ok, ConnPid2} = emqtt:start_link([{clientid, ClientId2}]),
+
+    {ok, _} = emqtt:connect(ConnPid1),
+    {ok, _} = emqtt:connect(ConnPid2),
+
+    emqtt:subscribe(ConnPid1, {<<"$share/local_group/", Topic/binary>>, 0}),
+    emqtt:subscribe(ConnPid2, {<<"$share/local_group/", Topic/binary>>, 0}),
+
+    ct:sleep(100),
+
+    Message1 = emqx_message:make(ClientId1, 0, Topic, <<"hello1">>),
+    Message2 = emqx_message:make(ClientId2, 0, Topic, <<"hello2">>),
+
+    emqx:publish(Message1),
+    {true, UsedSubPid1} = last_message(<<"hello1">>, [ConnPid1, ConnPid2]),
+
+    rpc:call(Node, emqx, publish, [Message2]),
+    {true, UsedSubPid2} = last_message(<<"hello2">>, [ConnPid1, ConnPid2]),
+    RemoteLocalGroupStrategy = rpc:call(Node, emqx_shared_sub, strategy, [<<"local_group">>]),
+
+    emqtt:stop(ConnPid1),
+    emqtt:stop(ConnPid2),
+    emqx_node_helpers:stop_slave(Node),
+
+    ?assertEqual(local, emqx_shared_sub:strategy(<<"local_group">>)),
+    ?assertEqual(local, RemoteLocalGroupStrategy),
+
+    ?assertNotEqual(UsedSubPid1, UsedSubPid2),
+    ok.
+
+t_local_fallback({'init', Config}) ->
+    ok = ensure_group_config(#{
+                               <<"local_group_fallback">> => local,
+                               <<"local_group">> => local,
+                               <<"round_robin_group">> => round_robin,
+                               <<"sticky_group">> => sticky
+                              }),
+
+    Node = start_slave(local_fallback_shared_sub_test19, 11885),
+    [{slave_node, Node} | Config];
+t_local_fallback({'end', _}) ->
+    ok = stop_slave(local_fallback_shared_sub_test19);
+t_local_fallback(Config) when is_list(Config) ->
+    Topic = <<"local_foo2/bar">>,
+    ClientId1 = <<"ClientId1">>,
+    ClientId2 = <<"ClientId2">>,
+    Node = proplists:get_value(slave_node, Config),
+
+    {ok, ConnPid1} = emqtt:start_link([{clientid, ClientId1}]),
+    {ok, _} = emqtt:connect(ConnPid1),
+    Message1 = emqx_message:make(ClientId1, 0, Topic, <<"hello1">>),
+    Message2 = emqx_message:make(ClientId2, 0, Topic, <<"hello2">>),
+
+    emqtt:subscribe(ConnPid1, {<<"$share/local_group_fallback/", Topic/binary>>, 0}),
+    ok = emqx_node_helpers:wait_for_synced_routes([node(), Node], Topic, timer:seconds(10)),
+
+    [{share, Topic, {ok, 1}}] = emqx:publish(Message1),
+    {true, UsedSubPid1} = last_message(<<"hello1">>, [ConnPid1]),
+
+    [{share, Topic, {ok, 1}}] = rpc:call(Node, emqx, publish, [Message2]),
+    {true, UsedSubPid2} = last_message(<<"hello2">>, [ConnPid1]),
+
+    emqtt:stop(ConnPid1),
+    emqx_node_helpers:stop_slave(Node),
+
+    ?assertEqual(UsedSubPid1, UsedSubPid2),
+    ok.
+
+%% This one tests that broker tries to select another shared subscriber
+%% If the first one doesn't return an ACK
+t_redispatch(Config) when is_list(Config) ->
+    ok = ensure_config(sticky, true),
+    application:set_env(emqx, shared_dispatch_ack_enabled, true),
+
+    Group = <<"group1">>,
+
+    Topic = <<"foo/bar">>,
+    ClientId1 = <<"ClientId1">>,
+    ClientId2 = <<"ClientId2">>,
+    {ok, ConnPid1} = emqtt:start_link([{clientid, ClientId1}, {auto_ack, false}]),
+    {ok, ConnPid2} = emqtt:start_link([{clientid, ClientId2}, {auto_ack, false}]),
+    {ok, _} = emqtt:connect(ConnPid1),
+    {ok, _} = emqtt:connect(ConnPid2),
+
+    emqtt:subscribe(ConnPid1, {<<"$share/", Group/binary, "/foo/bar">>, 1}),
+    emqtt:subscribe(ConnPid2, {<<"$share/", Group/binary, "/foo/bar">>, 1}),
+
+    Message = emqx_message:make(ClientId1, 1, Topic, <<"hello1">>),
+
+    emqx:publish(Message),
+
+    {true, UsedSubPid1} = last_message(<<"hello1">>, [ConnPid1, ConnPid2]),
+    ok = emqtt:stop(UsedSubPid1),
+
+    Res = last_message(<<"hello1">>, [ConnPid1, ConnPid2], 6000),
+    ?assertMatch({true, Pid} when Pid =/= UsedSubPid1, Res),
+
+    {true, UsedSubPid2} = Res,
+    emqtt:stop(UsedSubPid2),
+    ok.
+
+t_dispatch_when_inflights_are_full(Config) when is_list(Config) ->
+    ok = ensure_config(round_robin, true),
+    Topic = <<"foo/bar">>,
+    ClientId1 = <<"ClientId1">>,
+    ClientId2 = <<"ClientId2">>,
+
+    %% Note that max_inflight is 1
+    {ok, ConnPid1} = emqtt:start_link([{clientid, ClientId1}, {max_inflight, 1}]),
+    {ok, ConnPid2} = emqtt:start_link([{clientid, ClientId2}, {max_inflight, 1}]),
+    {ok, _} = emqtt:connect(ConnPid1),
+    {ok, _} = emqtt:connect(ConnPid2),
+
+    emqtt:subscribe(ConnPid1, {<<"$share/group/foo/bar">>, 2}),
+    emqtt:subscribe(ConnPid2, {<<"$share/group/foo/bar">>, 2}),
+
+    Message1 = emqx_message:make(ClientId1, 2, Topic, <<"hello1">>),
+    Message2 = emqx_message:make(ClientId1, 2, Topic, <<"hello2">>),
+    Message3 = emqx_message:make(ClientId1, 2, Topic, <<"hello3">>),
+    Message4 = emqx_message:make(ClientId1, 2, Topic, <<"hello4">>),
+    ct:sleep(100),
+
+    sys:suspend(ConnPid1),
+    sys:suspend(ConnPid2),
+
+    %% Fill in the inflight for first client
+    ?assertMatch([{_, _, {ok, 1}}], emqx:publish(Message1)),
+
+    %% Fill in the inflight for second client
+    ?assertMatch([{_, _, {ok, 1}}], emqx:publish(Message2)),
+
+    %% Now kill any client
+    erlang:exit(ConnPid1, normal),
+    ct:sleep(100),
+
+    %% And try to send the message
+    ?assertMatch([{_, _, {ok, 1}}], emqx:publish(Message3)),
+    ?assertMatch([{_, _, {ok, 1}}], emqx:publish(Message4)),
+
+    %% And see that it gets dispatched to the client which is alive, even if it's inflight is full
+    sys:resume(ConnPid2),
+    ct:sleep(100),
+    ?assertMatch({true, ConnPid2}, last_message(<<"hello3">>, [ConnPid1, ConnPid2])),
+    ?assertMatch({true, ConnPid2}, last_message(<<"hello4">>, [ConnPid1, ConnPid2])),
+
+    emqtt:stop(ConnPid2),
+    ok.
 
 %%--------------------------------------------------------------------
 %% help functions
@@ -325,6 +532,12 @@ ensure_config(Strategy, AckEnabled) ->
     application:set_env(emqx, shared_subscription_strategy, Strategy),
     application:set_env(emqx, shared_dispatch_ack_enabled, AckEnabled),
     ok.
+
+ensure_group_config(Node, Group2Strategy) ->
+    rpc:call(Node, application, set_env, [emqx, shared_subscription_strategy_per_group, Group2Strategy]).
+
+ensure_group_config(Group2Strategy) ->
+    application:set_env(emqx, shared_subscription_strategy_per_group, Group2Strategy).
 
 subscribed(Group, Topic, Pid) ->
     lists:member(Pid, emqx_shared_sub:subscribers(Group, Topic)).
@@ -343,3 +556,21 @@ recv_msgs(Count, Msgs) ->
         Msgs
     end.
 
+start_slave(Name, Port) ->
+    ok = emqx_ct_helpers:start_apps([emqx_modules]),
+    Listeners = [#{listen_on => {{127,0,0,1}, Port},
+                   start_apps => [emqx, emqx_modules],
+                   name => "internal",
+                   opts => [{zone,internal}],
+                   proto => tcp}],
+    emqx_node_helpers:start_slave(Name, #{listeners => Listeners}).
+
+stop_slave(Name) ->
+    emqx_node_helpers:stop_slave(Name).
+
+load_app(App) ->
+    case application:load(App) of
+        ok -> ok;
+        {error, {already_loaded, _}} -> ok;
+        {error, Reason} -> error({failed_to_load_app, App, Reason})
+    end.

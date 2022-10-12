@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2020-2021 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2020-2022 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -30,32 +30,74 @@
         , stop/1
         ]).
 
+-ifdef(TEST).
+-export([with_env/2]).
+-endif.
+
 %%--------------------------------------------------------------------
 %% Application callbacks
 %%--------------------------------------------------------------------
 
 start(_StartType, _StartArgs) ->
     {ok, Sup} = emqx_auth_mongo_sup:start_link(),
-    with_env(auth_query, fun reg_authmod/1),
-    with_env(acl_query,  fun reg_aclmod/1),
+    ok = safe_start(),
     {ok, Sup}.
 
 prep_stop(State) ->
-    ok = emqx:unhook('client.authenticate', fun emqx_auth_mongo:check/3),
-    ok = emqx:unhook('client.check_acl', fun emqx_acl_mongo:check_acl/5),
+    ok = unload_hook(),
+    _ = stop_pool(),
     State.
 
 stop(_State) ->
     ok.
 
+unload_hook() ->
+    ok = emqx:unhook('client.authenticate', fun emqx_auth_mongo:check/3),
+    ok = emqx:unhook('client.check_acl', fun emqx_acl_mongo:check_acl/5).
+
+stop_pool() ->
+    ecpool:stop_sup_pool(?APP).
+
+safe_start() ->
+    try
+        ok = with_env(auth_query, fun reg_authmod/1),
+        ok = with_env(acl_query,  fun reg_aclmod/1),
+        ok
+    catch _E:R:_S ->
+        unload_hook(),
+        _ = stop_pool(),
+        {error, R}
+    end.
+
 reg_authmod(AuthQuery) ->
-    emqx_auth_mongo:register_metrics(),
-    SuperQuery = r(super_query, application:get_env(?APP, super_query, undefined)),
-    ok = emqx:hook('client.authenticate', fun emqx_auth_mongo:check/3,
-                   [#{authquery => AuthQuery, superquery => SuperQuery, pool => ?APP}]).
+    case emqx_auth_mongo:available(?APP, AuthQuery) of
+        ok ->
+            HookFun = fun emqx_auth_mongo:check/3,
+            HookOptions = #{authquery => AuthQuery, superquery => undefined, pool => ?APP},
+            case r(super_query, application:get_env(?APP, super_query, undefined)) of
+                undefined ->
+                    ok = emqx:hook('client.authenticate', HookFun, [HookOptions]);
+                SuperQuery ->
+                    case emqx_auth_mongo:available(?APP, SuperQuery) of
+                        ok ->
+                            ok = emqx:hook('client.authenticate', HookFun,
+                                     [HookOptions#{superquery => SuperQuery}]);
+                        {error, Reason} ->
+                            {error, Reason}
+                    end
+            end;
+        {error, Reason} ->
+            {error, Reason}
+    end.
 
 reg_aclmod(AclQuery) ->
-    ok = emqx:hook('client.check_acl', fun emqx_acl_mongo:check_acl/5, [#{aclquery => AclQuery, pool => ?APP}]).
+    case emqx_auth_mongo:available(?APP, AclQuery) of
+        ok ->
+            ok = emqx:hook('client.check_acl', fun emqx_acl_mongo:check_acl/5,
+                     [#{aclquery => AclQuery, pool => ?APP}]);
+        {error, Reason} ->
+            {error, Reason}
+    end.
 
 %%--------------------------------------------------------------------
 %% Internal functions
@@ -83,4 +125,3 @@ r(auth_query, Config) ->
 r(acl_query, Config) ->
     #aclquery{collection = list_to_binary(get_value(collection, Config, "mqtt_acl")),
               selector   = get_value(selector, Config, [?DEFAULT_SELECTORS])}.
-

@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2020-2021 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2020-2022 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -29,7 +29,7 @@
 tlv_to_json(BaseName, TlvData) ->
     DecodedTlv = emqx_lwm2m_tlv:parse(TlvData),
     ObjectId = object_id(BaseName),
-    ObjDefinition = emqx_lwm2m_xml_object:get_obj_def(ObjectId, true),
+    ObjDefinition = emqx_lwm2m_xml_object:get_obj_def_assertive(ObjectId, true),
     case DecodedTlv of
         [#{tlv_resource_with_value:=Id, value:=Value}] ->
             TrueBaseName = basename(BaseName, undefined, undefined, Id, 3),
@@ -315,7 +315,7 @@ encode_int(Int) -> binary:encode_unsigned(Int).
 
 text_to_json(BaseName, Text) ->
     {ObjectId, ResourceId} = object_resource_id(BaseName),
-    ObjDefinition = emqx_lwm2m_xml_object:get_obj_def(ObjectId, true),
+    ObjDefinition = emqx_lwm2m_xml_object:get_obj_def_assertive(ObjectId, true),
     {K, V} = text_value(Text, ResourceId, ObjDefinition),
     #{bn=>BaseName, e=>[#{K=>V}]}.
 

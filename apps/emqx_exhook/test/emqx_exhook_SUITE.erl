@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2020-2021 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2020-2022 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -19,8 +19,19 @@
 -compile(export_all).
 -compile(nowarn_export_all).
 
+-include("emqx_exhook.hrl").
+
 -include_lib("eunit/include/eunit.hrl").
 -include_lib("common_test/include/ct.hrl").
+
+-define(OTHER_CLUSTER_NAME_ATOM, test_emqx_cluster).
+-define(OTHER_CLUSTER_NAME_STRING, "test_emqx_cluster").
+
+-define(TEST_PUBLISH_FILTERS_ATOM, test_message_filters).
+-define(TEST_PUBLISH_FILTERS_STRING, "test_message_filters").
+
+-define(BEFORE, <<"before_hardcoded">>).
+-define(AFTER, <<"after_hardcoded">>).
 
 %%--------------------------------------------------------------------
 %% Setups
@@ -41,7 +52,8 @@ set_special_cfgs(emqx) ->
     application:set_env(emqx, allow_anonymous, false),
     application:set_env(emqx, enable_acl_cache, false),
     application:set_env(emqx, plugins_loaded_file, undefined),
-    application:set_env(emqx, modules_loaded_file, undefined);
+    application:set_env(emqx, modules_loaded_file, undefined),
+    application:set_env(ekka, cluster_name, ?OTHER_CLUSTER_NAME_ATOM);
 set_special_cfgs(emqx_exhook) ->
     ok.
 
@@ -98,9 +110,158 @@ t_cli_stats(_) ->
     _ = emqx_exhook_cli:cli(x),
     unmeck_print().
 
+t_priority(_) ->
+    restart_apps_with_envs([ {emqx, fun set_special_cfgs/1}
+                           , {emqx_exhook, [{hook_priority, 1}]}]),
+
+    emqx_exhook:disable(default),
+    ok = emqx_exhook:enable(default),
+    [Callback | _] = emqx_hooks:lookup('client.connected'),
+    ?assertEqual(1, emqx_hooks:callback_priority(Callback)).
+
+t_cluster_name(_) ->
+    SetEnvFun =
+        fun(emqx) ->
+                set_special_cfgs(emqx),
+                application:set_env(ekka, cluster_name, ?OTHER_CLUSTER_NAME_ATOM);
+           (emqx_exhook) ->
+                application:set_env(emqx_exhook, hook_priority, 1)
+        end,
+
+    emqx_ct_helpers:stop_apps([emqx, emqx_exhook]),
+    emqx_ct_helpers:start_apps([emqx, emqx_exhook], SetEnvFun),
+
+    ?assertEqual(?OTHER_CLUSTER_NAME_STRING, emqx_sys:cluster_name()),
+
+    emqx_exhook:disable(default),
+    ok = emqx_exhook:enable(default),
+    %% See emqx_exhook_demo_svr:on_provider_loaded/2
+    ?assertEqual([], emqx_hooks:lookup('session.created')),
+    ?assertEqual([], emqx_hooks:lookup('message_publish')),
+
+    [Callback | _] = emqx_hooks:lookup('client.connected'),
+    ?assertEqual(1, emqx_hooks:callback_priority(Callback)).
+
+t_message_topic_filters(_) ->
+    %% ========== Prepare hooks
+    Priority = 2,
+    SetEnvFun =
+        fun(emqx) ->
+                set_special_cfgs(emqx),
+                application:set_env(ekka, cluster_name, ?TEST_PUBLISH_FILTERS_ATOM);
+           (emqx_exhook) ->
+                application:set_env(emqx_exhook, hook_priority, Priority)
+        end,
+
+    emqx_ct_helpers:stop_apps([emqx, emqx_exhook]),
+    emqx_ct_helpers:start_apps([emqx, emqx_exhook], SetEnvFun),
+
+    ?assertEqual(?TEST_PUBLISH_FILTERS_STRING, emqx_sys:cluster_name()),
+
+    emqx_exhook:disable(default),
+    ok = emqx_exhook:enable(default),
+    %% See emqx_exhook_demo_svr:on_provider_loaded/2
+
+    [Callback | _] = emqx_hooks:lookup('message.publish'),
+    ?assertEqual(Priority, emqx_hooks:callback_priority(Callback)),
+
+    %% ========== Test topic filters
+    {ok, C1} = emqtt:start_link([{clientid, <<"client1">>}, {username, <<"gooduser">>}]), {ok, _} = emqtt:connect(C1),
+    {ok, C2} = emqtt:start_link([{clientid, <<"test_filter_client">>}, {username, <<"gooduser">>}]), {ok, _} = emqtt:connect(C2),
+
+    {ok, _, _} = emqtt:subscribe(C1,[{<<"exhook/hardcoded">>, qos0},
+                                     {<<"t/1">>, qos0},
+                                     {<<"t/2">>, qos0},
+                                     {<<"a/1">>, qos1},
+                                     {<<"a/2">>, qos2},
+                                     {<<"b/1">>, qos1},
+                                     {<<"b/2">>, qos2},
+                                     {<<"b/3/4">>, qos1},
+                                     {<<"b/3/4/5">>, qos2}
+                                    ]),
+
+    %% server only handle topic `t/1`, rewrite all topic to `exhook/hardcoded`,
+    %% rewrite all payload to <<"after_hardcoded">>
+    %% See emqx_exhook_demo_svr:on_message_publish/2
+    'test_t/1_topic'(C1, C2),
+    'test_a/#_topic'(C1, C2),
+    'test_b/+_topic'(C1, C2),
+
+    ok = emqtt:disconnect(C1),
+    ok = emqtt:disconnect(C2).
+
+
+'test_t/1_topic'(_C1, C2) ->
+    ok = emqtt:publish(C2, <<"t/1">>, ?BEFORE, 0),
+    [Msg1 | _] = receive_messages(1),
+    ?assertEqual({ok, ?AFTER}, maps:find(payload, Msg1)),
+
+    ok = emqtt:publish(C2, <<"t/2">>, ?BEFORE, 0),
+    [Msg2 | _] = receive_messages(1),
+    ?assertEqual({ok, ?BEFORE}, maps:find(payload, Msg2)).
+
+
+'test_a/#_topic'(_C1, C2) ->
+    {ok, _} = emqtt:publish(C2, <<"a/1">>, ?BEFORE, 1),
+    [Msg1 | _] = receive_messages(1),
+    ?assertEqual({ok, ?AFTER}, maps:find(payload, Msg1)),
+
+    {ok, _} = emqtt:publish(C2, <<"a/2">>, ?BEFORE, 1),
+    [Msg2 | _] = receive_messages(1),
+    ?assertEqual({ok, ?AFTER}, maps:find(payload, Msg2)),
+
+    {ok, _} = emqtt:publish(C2, <<"a/3/4">>, ?BEFORE, 1),
+    [Msg3 | _] = receive_messages(1),
+    ?assertEqual({ok, ?AFTER}, maps:find(payload, Msg3)),
+
+    {ok, _} = emqtt:publish(C2, <<"a/3/4/5">>, ?BEFORE, 1),
+    [Msg4 | _] = receive_messages(1),
+    ?assertEqual({ok, ?AFTER}, maps:find(payload, Msg4)).
+
+'test_b/+_topic'(_C1, C2) ->
+    {ok, _} = emqtt:publish(C2, <<"b/1">>, ?BEFORE, 1),
+    [Msg1 | _] = receive_messages(1),
+    ?assertEqual({ok, ?AFTER}, maps:find(payload, Msg1)),
+
+    {ok, _} = emqtt:publish(C2, <<"b/2">>, ?BEFORE, 1),
+    [Msg2 | _] = receive_messages(1),
+    ?assertEqual({ok, ?AFTER}, maps:find(payload, Msg2)),
+
+    {ok, _} = emqtt:publish(C2, <<"b/3/4">>, ?BEFORE, 1),
+    [Msg3 | _] = receive_messages(1),
+    ?assertEqual({ok, ?BEFORE}, maps:find(payload, Msg3)),
+
+    {ok, _} = emqtt:publish(C2, <<"b/3/4/5">>, ?BEFORE, 2),
+    [Msg4 | _] = receive_messages(1),
+    ?assertEqual({ok, ?BEFORE}, maps:find(payload, Msg4)).
+
+
 %%--------------------------------------------------------------------
 %% Utils
 %%--------------------------------------------------------------------
+
+%% TODO: make it more general and move to `emqx_ct_helpers`
+restart_app_with_envs(App, Fun)
+  when is_function(Fun) ->
+    emqx_ct_helpers:stop_apps([App]),
+    emqx_ct_helpers:start_apps([App], Fun);
+
+restart_app_with_envs(App, Envs)
+  when is_list(Envs) ->
+    emqx_ct_helpers:stop_apps([App]),
+    HandlerFun =
+        fun(AppName) ->
+                lists:foreach(fun({Key, Val}) ->
+                                      application:set_env(AppName, Key, Val)
+                              end, Envs)
+        end,
+    emqx_ct_helpers:start_apps([App], HandlerFun).
+
+restart_apps_with_envs([]) ->
+    ok;
+restart_apps_with_envs([{App, Envs} | Rest]) ->
+    restart_app_with_envs(App, Envs),
+    restart_apps_with_envs(Rest).
 
 meck_print() ->
     meck:new(emqx_ctl, [passthrough, no_history, no_link]),
@@ -109,3 +270,18 @@ meck_print() ->
 
 unmeck_print() ->
     meck:unload(emqx_ctl).
+
+receive_messages(Count) ->
+    receive_messages(Count, []).
+
+receive_messages(0, Msgs) ->
+    Msgs;
+receive_messages(Count, Msgs) ->
+    receive
+        {publish, Msg} ->
+            receive_messages(Count-1, [Msg|Msgs]);
+        _Other ->
+            receive_messages(Count, Msgs)
+    after 1000 ->
+        Msgs
+    end.

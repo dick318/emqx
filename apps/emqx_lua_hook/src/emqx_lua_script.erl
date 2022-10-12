@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2020-2021 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2020-2022 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -169,8 +169,11 @@ on_client_subscribe(#{clientid := ClientId, username := Username}, _Properties, 
     NewTopicFilters =
         lists:foldr(fun(TopicFilter, Acc) ->
                         case on_client_subscribe_single(ClientId, Username, TopicFilter, LuaState) of
-                            false -> Acc;
-                            NewTopicFilter -> [NewTopicFilter | Acc]
+                            false ->
+                                {Topic, Opts} = TopicFilter,
+                                [{Topic, Opts#{deny_subscription => true}} | Acc];
+                            NewTopicFilter ->
+                                [NewTopicFilter | Acc]
                         end
                     end, [], TopicFilters),
     case NewTopicFilters of
@@ -280,13 +283,14 @@ on_message_publish(Message = #message{from = ClientId,
             ?LOG(error, "Failed to execute function on_message_publish(), which has syntax error, St=~p", [St]),
             {ok, Message};
         {[false], _St} ->
-            {stop, Message};
+            ?LOG(debug, "Lua function on_message_publish() returned false, setting allow_publish header to false", []),
+            {stop, Message#message{headers = Headers#{allow_publish => false}}};
         {[NewTopic, NewPayload, NewQos, NewRetain], _St} ->
-            ?LOG(debug, "Lua function on_message_publish() return ~p", [{NewTopic, NewPayload, NewQos, NewRetain}]),
+            ?LOG(debug, "Lua function on_message_publish() returned ~p", [{NewTopic, NewPayload, NewQos, NewRetain}]),
             {ok, Message#message{topic = NewTopic, payload = NewPayload,
                                  qos = round(NewQos), flags = Flags#{retain => to_retain(NewRetain)}}};
         Other ->
-            ?LOG(error, "Topic=~p, lua function on_message_publish caught exception, ~p", [Topic, Other]),
+            ?LOG(error, "Topic=~p, lua function on_message_publish() caught exception, ~p", [Topic, Other]),
             {ok, Message}
     end.
 

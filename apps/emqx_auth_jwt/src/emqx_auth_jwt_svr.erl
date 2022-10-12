@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2020-2021 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2020-2022 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -20,13 +20,14 @@
 
 -include_lib("emqx/include/logger.hrl").
 -include_lib("jose/include/jose_jwk.hrl").
+-include_lib("snabbkaffe/include/snabbkaffe.hrl").
 
 -logger_header("[JWT-SVR]").
 
 %% APIs
 -export([start_link/1]).
 
--export([verify/2]).
+-export([verify/1]).
 
 %% gen_server callbacks
 -export([ init/1
@@ -44,8 +45,9 @@
                 | {interval, pos_integer()}.
 
 -define(INTERVAL, 300000).
+-define(TAB, ?MODULE).
 
--record(state, {static, remote, addr, tref, intv}).
+-record(state, {addr, tref, intv}).
 
 %%--------------------------------------------------------------------
 %% APIs
@@ -55,13 +57,13 @@
 start_link(Options) ->
     gen_server:start_link(?MODULE, [Options], []).
 
--spec verify(pid(), binary())
+-spec verify(binary())
     -> {error, term()}
      | {ok, Payload :: map()}.
-verify(S, JwsCompacted) when is_binary(JwsCompacted) ->
+verify(JwsCompacted) when is_binary(JwsCompacted) ->
     case catch jose_jws:peek(JwsCompacted) of
         {'EXIT', _} -> {error, not_token};
-        _ -> gen_server:call(S, {verify, JwsCompacted})
+        _ -> do_verify(JwsCompacted)
     end.
 
 %%--------------------------------------------------------------------
@@ -70,43 +72,25 @@ verify(S, JwsCompacted) when is_binary(JwsCompacted) ->
 
 init([Options]) ->
     ok = jose:json_module(jiffy),
-    {Static, Remote} = do_init_jwks(Options),
+    _ = ets:new(?TAB, [set, protected, named_table]),
+    Static = do_init_jwks(Options),
+    to_request_jwks(Options),
+    true = ets:insert(?TAB, [{static, Static}, {remote, undefined}]),
     Intv = proplists:get_value(interval, Options, ?INTERVAL),
     {ok, reset_timer(
            #state{
-              static = Static,
-              remote = Remote,
               addr = proplists:get_value(jwks_addr, Options),
               intv = Intv})}.
 
 %% @private
 do_init_jwks(Options) ->
-    K2J = fun(K, F) ->
-              case proplists:get_value(K, Options) of
-                  undefined -> undefined;
-                  V ->
-                     try F(V) of
-                         {error, Reason} ->
-                             ?LOG(warning, "Build ~p JWK ~p failed: {error, ~p}~n",
-                                  [K, V, Reason]),
-                             undefined;
-                         J -> J
-                     catch T:R:_ ->
-                         ?LOG(warning, "Build ~p JWK ~p failed: {~p, ~p}~n",
-                              [K, V, T, R]),
-                         undefined
-                     end
-              end
-          end,
-    OctJwk = K2J(secret, fun(V) ->
-                             jose_jwk:from_oct(list_to_binary(V))
-                         end),
-    PemJwk = K2J(pubkey, fun jose_jwk:from_pem_file/1),
-    Remote = K2J(jwks_addr, fun request_jwks/1),
-    {[J ||J <- [OctJwk, PemJwk], J /= undefined], Remote}.
-
-handle_call({verify, JwsCompacted}, _From, State) ->
-    handle_verify(JwsCompacted, State);
+    OctJwk = key2jwt_value(secret,
+                           fun(V) ->
+                                   jose_jwk:from_oct(list_to_binary(V))
+                           end,
+                           Options),
+    PemJwk = key2jwt_value(pubkey, fun jose_jwk:from_pem_file/1, Options),
+    [J ||J <- [OctJwk, PemJwk], J /= undefined].
 
 handle_call(_Req, _From, State) ->
     {reply, ok, State}.
@@ -116,11 +100,17 @@ handle_cast(_Msg, State) ->
 
 handle_info({timeout, _TRef, refresh}, State = #state{addr = Addr}) ->
     NState = try
-                 State#state{remote = request_jwks(Addr)}
+                 true = ets:insert(?TAB, {remote, request_jwks(Addr)}),
+                 State
              catch _:_ ->
                  State
              end,
     {noreply, reset_timer(NState)};
+
+handle_info({request_jwks, Options}, State) ->
+    Remote = key2jwt_value(jwks_addr, fun request_jwks/1, Options),
+    true = ets:insert(?TAB, {remote, Remote}),
+    {noreply, State};
 
 handle_info(_Info, State) ->
     {noreply, State}.
@@ -136,24 +126,10 @@ code_change(_OldVsn, State, _Extra) ->
 %% Internal funcs
 %%--------------------------------------------------------------------
 
-handle_verify(JwsCompacted,
-              State = #state{static = Static, remote = Remote}) ->
-    try
-        Jwks = case emqx_json:decode(jose_jws:peek_protected(JwsCompacted), [return_maps]) of
-                   #{<<"kid">> := Kid} when Remote /= undefined ->
-                       [J || J <- Remote, maps:get(<<"kid">>, J#jose_jwk.fields, undefined) =:= Kid];
-                   _ -> Static
-               end,
-        case Jwks of
-            [] -> {reply, {error, not_found}, State};
-            _ ->
-                {reply, do_verify(JwsCompacted, Jwks), State}
-        end
-    catch
-        Class : Reason : Stk ->
-            ?LOG(error, "Handle JWK crashed: ~p, ~p, stacktrace: ~p~n",
-                        [Class, Reason, Stk]),
-            {reply, {error, invalid_signature}, State}
+keys(Type) ->
+    case ets:lookup(?TAB, Type) of
+        [{_, Keys}] -> Keys;
+        [] -> []
     end.
 
 request_jwks(Addr) ->
@@ -163,7 +139,9 @@ request_jwks(Addr) ->
         {ok, {_Code, _Headers, Body}} ->
             try
                 JwkSet = jose_jwk:from(emqx_json:decode(Body, [return_maps])),
-                {_, Jwks} = JwkSet#jose_jwk.keys, Jwks
+                {_, Jwks} = JwkSet#jose_jwk.keys,
+                ?tp(debug, emqx_auth_jwt_svr_jwks_updated, #{jwks => Jwks, pid => self()}),
+                Jwks
             catch _:_ ->
                 ?LOG(error, "Invalid jwks server response: ~p~n", [Body]),
                 error(badarg)
@@ -181,6 +159,26 @@ cancel_timer(State = #state{tref = TRef}) ->
     _ = erlang:cancel_timer(TRef),
     State#state{tref = undefined}.
 
+do_verify(JwsCompacted) ->
+    try
+        Remote = keys(remote),
+        Jwks = case emqx_json:decode(jose_jws:peek_protected(JwsCompacted), [return_maps]) of
+                   #{<<"kid">> := Kid} when Remote /= undefined ->
+                       [J || J <- Remote, maps:get(<<"kid">>, J#jose_jwk.fields, undefined) =:= Kid];
+                   _ -> keys(static)
+               end,
+        case Jwks of
+            [] -> {error, not_found};
+            _ ->
+                do_verify(JwsCompacted, Jwks)
+        end
+    catch
+        Class : Reason : Stk ->
+            ?LOG(error, "verify JWK crashed: ~p, ~p, stacktrace: ~p~n",
+                        [Class, Reason, Stk]),
+            {error, invalid_signature}
+    end.
+
 do_verify(_JwsCompated, []) ->
     {error, invalid_signature};
 do_verify(JwsCompacted, [Jwk|More]) ->
@@ -190,7 +188,11 @@ do_verify(JwsCompacted, [Jwk|More]) ->
             case check_claims(Claims) of
                 {false, <<"exp">>} ->
                     {error, {invalid_signature, expired}};
-                NClaims ->
+                {false, <<"iat">>} ->
+                    {error, {invalid_signature, issued_in_future}};
+                {false, <<"nbf">>} ->
+                    {error, {invalid_signature, not_valid_yet}};
+                {true, NClaims} ->
                     {ok, NClaims}
             end;
         {false, _, _} ->
@@ -198,27 +200,62 @@ do_verify(JwsCompacted, [Jwk|More]) ->
     end.
 
 check_claims(Claims) ->
-    Now = os:system_time(seconds),
-    Checker = [{<<"exp">>, fun(ExpireTime) ->
-                               Now < ExpireTime
-                           end},
-               {<<"iat">>, fun(IssueAt) ->
-                               IssueAt =< Now
-                           end},
-               {<<"nbf">>, fun(NotBefore) ->
-                               NotBefore =< Now
-                           end}
+    Now = erlang:system_time(seconds),
+    Checker = [{<<"exp">>, with_num_value(
+                             fun(ExpireTime) -> Now < ExpireTime end)},
+               {<<"iat">>, with_num_value(
+                             fun(IssueAt) -> IssueAt =< Now end)},
+               {<<"nbf">>, with_num_value(
+                             fun(NotBefore) -> NotBefore =< Now end)}
               ],
     do_check_claim(Checker, Claims).
 
+with_num_value(Fun) ->
+    fun(Value) ->
+            case Value of
+                Num when is_number(Num) -> Fun(Num);
+                Bin when is_binary(Bin) ->
+                    case emqx_auth_jwt:string_to_number(Bin) of
+                        {ok, Num} -> Fun(Num);
+                        _ -> false
+                    end;
+                Str when is_list(Str) ->
+                    case emqx_auth_jwt:string_to_number(Str) of
+                        {ok, Num} -> Fun(Num);
+                        _ -> false
+                    end
+            end
+    end.
+
 do_check_claim([], Claims) ->
-    Claims;
+    {true, Claims};
 do_check_claim([{K, F}|More], Claims) ->
-    case maps:take(K, Claims) of
-        error -> do_check_claim(More, Claims);
-        {V, NClaims} ->
+    case Claims of
+        #{K := V} ->
             case F(V) of
-                true -> do_check_claim(More, NClaims);
+                true -> do_check_claim(More, Claims);
                 _ -> {false, K}
+            end;
+        _ ->
+            do_check_claim(More, Claims)
+    end.
+
+to_request_jwks(Options) ->
+    erlang:send(self(), {request_jwks, Options}).
+
+key2jwt_value(Key, Func, Options) ->
+    case proplists:get_value(Key, Options) of
+        undefined -> undefined;
+        V ->
+            try Func(V) of
+                {error, Reason} ->
+                    ?LOG(warning, "Build ~p JWK ~p failed: {error, ~p}~n",
+                         [Key, V, Reason]),
+                    undefined;
+                J -> J
+            catch T:R ->
+                    ?LOG(warning, "Build ~p JWK ~p failed: {~p, ~p}~n",
+                         [Key, V, T, R]),
+                    undefined
             end
     end.

@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2019-2021 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2019-2022 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -481,6 +481,45 @@ t_handle_deliver_nl(_) ->
     NMsg = emqx_message:set_flag(nl, Msg),
     {ok, Channel} = emqx_channel:handle_deliver([{deliver, <<"t1">>, NMsg}], Channel).
 
+t_handle_deliver_shared_in_no_connection(_) ->
+    Grp = <<"g">>,
+    Sender = self(),
+    Ref1 = make_ref(),
+    Ref2 = make_ref(),
+    Chann = emqx_channel:set_field(conn_state, disconnected, channel()),
+
+    Msg0 = emqx_shared_sub:with_group_ack(
+             emqx_message:make(test, ?QOS_1, <<"t">>, <<"qos1">>),
+             Grp,
+             fresh,
+             Sender,
+             Ref1
+            ),
+    Msg1 = emqx_shared_sub:with_group_ack(
+             emqx_message:make(test, ?QOS_2, <<"t">>, <<"qos2">>),
+             Grp,
+             retry,
+             Sender,
+             Ref2
+            ),
+    Delivers = [{deliver, <<"+">>, Msg0}, {deliver, <<"+">>, Msg1}],
+
+    %% all shared msgs should be queued if shared_dispatch_ack_enabled=false
+    meck:new(emqx_shared_sub, [passthrough, no_history]),
+    meck:expect(emqx_shared_sub, is_ack_required, fun(_) -> false end),
+    {ok, Chann1} = emqx_channel:handle_deliver(Delivers, Chann),
+    ?assertEqual(2, proplists:get_value(mqueue_len, emqx_channel:stats(Chann1))),
+    meck:unload(emqx_shared_sub),
+
+    %% only fresh shared msgs should be queued if shared_dispatch_ack_enabled=true
+    meck:new(emqx_shared_sub, [passthrough, no_history]),
+    meck:expect(emqx_shared_sub, is_ack_required, fun(_) -> true end),
+    {ok, Chann2} = emqx_channel:handle_deliver(Delivers, Chann),
+    ?assertEqual(1, proplists:get_value(mqueue_len, emqx_channel:stats(Chann2))),
+    receive {Ref1, {shared_sub_nack, no_connection}} -> ok after 0 -> ?assert(false) end,
+    receive {Ref2, shared_sub_ack} -> ok after 0 -> ?assert(false) end,
+    meck:unload(emqx_shared_sub).
+
 %%--------------------------------------------------------------------
 %% Test cases for handle_out
 %%--------------------------------------------------------------------
@@ -577,7 +616,32 @@ t_handle_out_unexpected(_) ->
 %%--------------------------------------------------------------------
 
 t_handle_call_kick(_) ->
-    {shutdown, kicked, ok, _Chan} = emqx_channel:handle_call(kick, channel()).
+    Channelv5 = channel(),
+    Channelv4 = v4(Channelv5),
+    {shutdown, kicked, ok, _} = emqx_channel:handle_call(kick, Channelv4),
+    {shutdown, kicked, ok,
+     ?DISCONNECT_PACKET(?RC_ADMINISTRATIVE_ACTION),
+     _} = emqx_channel:handle_call(kick, Channelv5),
+
+    DisconnectedChannelv5 = channel(#{conn_state => disconnected}),
+    DisconnectedChannelv4 = v4(DisconnectedChannelv5),
+
+    {shutdown, kicked, ok, _} = emqx_channel:handle_call(kick, DisconnectedChannelv5),
+    {shutdown, kicked, ok, _} = emqx_channel:handle_call(kick, DisconnectedChannelv4).
+
+t_handle_kicked_publish_will_msg(_) ->
+    Self = self(),
+    ok = meck:expect(emqx_broker, publish, fun(M) -> Self ! {pub, M} end),
+
+    Msg = emqx_message:make(test, <<"will_topic">>, <<"will_payload">>),
+
+    {shutdown, kicked, ok,
+     ?DISCONNECT_PACKET(?RC_ADMINISTRATIVE_ACTION),
+     _} = emqx_channel:handle_call(kick, channel(#{will_msg => Msg})),
+    receive
+        {pub, Msg} -> ok
+    after 200 -> exit(will_message_not_published)
+    end.
 
 t_handle_call_discard(_) ->
     Packet = ?DISCONNECT_PACKET(?RC_SESSION_TAKEN_OVER),
@@ -858,3 +922,11 @@ session(InitFields) when is_map(InitFields) ->
 quota() ->
     emqx_limiter:init(zone, [{conn_messages_routing, {5, 1}},
                              {overall_messages_routing, {10, 1}}]).
+
+v4(Channel) ->
+    ConnInfo = emqx_channel:info(conninfo, Channel),
+    emqx_channel:set_field(
+      conninfo,
+      maps:put(proto_ver, ?MQTT_PROTO_V4, ConnInfo),
+      Channel
+     ).

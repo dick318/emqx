@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2017-2021 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2017-2022 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -45,12 +45,41 @@
         , index_of/2
         , maybe_parse_ip/1
         , ipv6_probe/1
+        , ipv6_probe/2
+        , pmap/2
+        , pmap/3
         ]).
 
 -export([ bin2hexstr_A_F/1
         , bin2hexstr_a_f/1
         , hexstr2bin/1
         ]).
+
+-export([ is_sane_id/1
+        ]).
+
+-export([
+    nolink_apply/1,
+    nolink_apply/2
+]).
+
+-define(VALID_STR_RE, "^[A-Za-z0-9]+[A-Za-z0-9-_]*$").
+-define(DEFAULT_PMAP_TIMEOUT, 5000).
+
+-spec is_sane_id(list() | binary()) -> ok | {error, Reason::binary()}.
+is_sane_id(Str) ->
+    StrLen = len(Str),
+    case StrLen > 0 andalso StrLen =< 256 of
+        true ->
+            case re:run(Str, ?VALID_STR_RE) of
+                nomatch -> {error, <<"required: " ?VALID_STR_RE>>};
+                _ -> ok
+            end;
+        false -> {error, <<"0 < Length =< 256">>}
+    end.
+
+len(Bin) when is_binary(Bin) -> byte_size(Bin);
+len(Str) when is_list(Str) -> length(Str).
 
 -define(OOM_FACTOR, 1.25).
 
@@ -64,19 +93,15 @@ maybe_parse_ip(Host) ->
 
 %% @doc Add `ipv6_probe' socket option if it's supported.
 ipv6_probe(Opts) ->
-    case persistent_term:get({?MODULE, ipv6_probe_supported}, unknown) of
-        unknown ->
-            %% e.g. 23.2.7.1-emqx-2-x86_64-unknown-linux-gnu-64
-            OtpVsn = emqx_vm:get_otp_version(),
-            Bool = (match =:= re:run(OtpVsn, "emqx", [{capture, none}])),
-            _ = persistent_term:put({?MODULE, ipv6_probe_supported}, Bool),
-            ipv6_probe(Bool, Opts);
-        Bool ->
-            ipv6_probe(Bool, Opts)
-    end.
+    ipv6_probe(Opts, true).
 
-ipv6_probe(false, Opts) -> Opts;
-ipv6_probe(true, Opts) -> [{ipv6_probe, true} | Opts].
+ipv6_probe(Opts, Ipv6Probe) when is_boolean(Ipv6Probe) orelse is_integer(Ipv6Probe) ->
+    Bool = try gen_tcp:ipv6_probe()
+           catch _ : _ -> false end,
+    ipv6_probe(Bool, Opts, Ipv6Probe).
+
+ipv6_probe(false, Opts, _) -> Opts;
+ipv6_probe(true, Opts, Ipv6Probe) -> [{ipv6_probe, Ipv6Probe} | Opts].
 
 %% @doc Merge options
 -spec(merge_opts(Opts, Opts) -> Opts when Opts :: proplists:proplist()).
@@ -297,16 +322,158 @@ int2hexchar(I, lower) -> I - 10 + $a.
 
 -spec(hexstr2bin(binary()) -> binary()).
 hexstr2bin(B) when is_binary(B) ->
-    << <<(hexchar2int(H)*16 + hexchar2int(L))>> || <<H:8, L:8>> <= B>>.
+    hexstr2bin(B, erlang:bit_size(B)).
+
+hexstr2bin(B, Size) when is_binary(B) ->
+    case Size rem 16 of
+        0 ->
+            make_binary(B);
+        8 ->
+            make_binary(<<"0", B/binary>>);
+        _ ->
+            throw({unsupport_hex_string, B, Size})
+    end.
+
+make_binary(B) -> <<<<(hexchar2int(H) * 16 + hexchar2int(L))>> || <<H:8, L:8>> <= B>>.
 
 hexchar2int(I) when I >= $0 andalso I =< $9 -> I - $0;
 hexchar2int(I) when I >= $A andalso I =< $F -> I - $A + 10;
 hexchar2int(I) when I >= $a andalso I =< $f -> I - $a + 10.
+
+%% @doc Like lists:map/2, only the callback function is evaluated
+%% concurrently.
+-spec pmap(fun((A) -> B), list(A)) -> list(B).
+pmap(Fun, List) when is_function(Fun, 1), is_list(List) ->
+    pmap(Fun, List, ?DEFAULT_PMAP_TIMEOUT).
+
+-spec pmap(fun((A) -> B), list(A), timeout()) -> list(B).
+pmap(Fun, List, Timeout) when
+    is_function(Fun, 1), is_list(List), is_integer(Timeout), Timeout >= 0
+->
+    nolink_apply(fun() -> do_parallel_map(Fun, List) end, Timeout).
+
+%% @doc Delegate a function to a worker process.
+%% The function may spawn_link other processes but we do not
+%% want the caller process to be linked.
+%% This is done by isolating the possible link with a not-linked
+%% middleman process.
+nolink_apply(Fun) -> nolink_apply(Fun, infinity).
+
+%% @doc Same as `nolink_apply/1', with a timeout.
+-spec nolink_apply(function(), timer:timeout()) -> term().
+nolink_apply(Fun, Timeout) when is_function(Fun, 0) ->
+    Caller = self(),
+    ResRef = make_ref(),
+    Middleman = erlang:spawn(make_middleman_fn(Caller, Fun, ResRef)),
+    receive
+        {ResRef, {normal, Result}} ->
+            Result;
+        {ResRef, {exception, {C, E, S}}} ->
+            erlang:raise(C, E, S);
+        {ResRef, {'EXIT', Reason}} ->
+            exit(Reason)
+    after Timeout ->
+        exit(Middleman, kill),
+        exit(timeout)
+    end.
+
+-spec make_middleman_fn(pid(), fun(() -> any()), reference()) -> fun(() -> no_return()).
+make_middleman_fn(Caller, Fun, ResRef) ->
+    fun() ->
+        process_flag(trap_exit, true),
+        CallerMRef = erlang:monitor(process, Caller),
+        Worker = erlang:spawn_link(make_worker_fn(Caller, Fun, ResRef)),
+        receive
+            {'DOWN', CallerMRef, process, _, _} ->
+                %% For whatever reason, if the caller is dead,
+                %% there is no reason to continue
+                exit(Worker, kill),
+                exit(normal);
+            {'EXIT', Worker, normal} ->
+                exit(normal);
+            {'EXIT', Worker, Reason} ->
+                %% worker exited with some reason other than 'normal'
+                _ = erlang:send(Caller, {ResRef, {'EXIT', Reason}}),
+                exit(normal)
+        end
+    end.
+
+-spec make_worker_fn(pid(), fun(() -> any()), reference()) -> fun(() -> no_return()).
+make_worker_fn(Caller, Fun, ResRef) ->
+    fun() ->
+        Res =
+            try
+                {normal, Fun()}
+            catch
+                C:E:S ->
+                    {exception, {C, E, S}}
+            end,
+        _ = erlang:send(Caller, {ResRef, Res}),
+        exit(normal)
+    end.
+
+do_parallel_map(Fun, List) ->
+    Parent = self(),
+    PidList = lists:map(
+        fun(Item) ->
+            erlang:spawn_link(
+                fun() ->
+                    Res =
+                        try
+                            {normal, Fun(Item)}
+                        catch
+                            C:E:St ->
+                                {exception, {C, E, St}}
+                        end,
+                    Parent ! {self(), Res}
+                end
+            )
+        end,
+        List
+    ),
+    lists:foldr(
+        fun(Pid, Acc) ->
+            receive
+                {Pid, {normal, Result}} ->
+                    [Result | Acc];
+                {Pid, {exception, {C, E, St}}} ->
+                    erlang:raise(C, E, St)
+            end
+        end,
+        [],
+        PidList
+    ).
 
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
 
 ipv6_probe_test() ->
     ?assertEqual([{ipv6_probe, true}], ipv6_probe([])).
+
+is_sane_id_test() ->
+    ?assertMatch({error, _}, is_sane_id("")),
+    ?assertMatch({error, _}, is_sane_id("_")),
+    ?assertMatch({error, _}, is_sane_id("_aaa")),
+    ?assertMatch({error, _}, is_sane_id("lkad/oddl")),
+    ?assertMatch({error, _}, is_sane_id("lkad*oddl")),
+    ?assertMatch({error, _}, is_sane_id("script>lkadoddl")),
+    ?assertMatch({error, _}, is_sane_id("<script>lkadoddl")),
+
+    ?assertMatch(ok, is_sane_id(<<"Abckdf_lkdfd_1222">>)),
+    ?assertMatch(ok, is_sane_id("Abckdf_lkdfd_1222")),
+    ?assertMatch(ok, is_sane_id("abckdf_lkdfd_1222")),
+    ?assertMatch(ok, is_sane_id("abckdflkdfd1222")),
+    ?assertMatch(ok, is_sane_id("abckdflkdf")),
+    ?assertMatch(ok, is_sane_id("a1122222")),
+    ?assertMatch(ok, is_sane_id("1223333434")),
+    ?assertMatch(ok, is_sane_id("1lkdfaldk")),
+
+    Ok = lists:flatten(lists:duplicate(256, "a")),
+    Bad = Ok ++ "a",
+    ?assertMatch(ok, is_sane_id(Ok)),
+    ?assertMatch(ok, is_sane_id(list_to_binary(Ok))),
+    ?assertMatch({error, _}, is_sane_id(Bad)),
+    ?assertMatch({error, _}, is_sane_id(list_to_binary(Bad))),
+    ok.
 
 -endif.

@@ -1,4 +1,4 @@
-ARG BUILD_FROM=emqx/build-env:erl23.2.7.2-emqx-3-alpine
+ARG BUILD_FROM=emqx/build-env:erl23.3.4.9-3-alpine
 ARG RUN_FROM=alpine:3.12
 FROM ${BUILD_FROM} AS builder
 
@@ -21,6 +21,7 @@ RUN apk add --no-cache \
     libc-dev \
     libstdc++ \
     bash \
+    tzdata \
     jq
 
 COPY . /emqx
@@ -69,7 +70,7 @@ RUN sed -i 's/dl-cdn.alpinelinux.org/mirrors.ustc.edu.cn/g' /etc/apk/repositorie
 
 RUN apk update
 
-RUN apk add --no-cache curl ncurses-libs openssl sudo libstdc++ bash
+RUN apk add --no-cache curl ncurses-libs openssl sudo libstdc++ bash tzdata
 
 WORKDIR /opt/emqx
 
@@ -82,7 +83,8 @@ RUN chgrp -Rf emqx /opt/emqx && chmod -Rf g+w /opt/emqx \
 
 USER emqx
 
-VOLUME ["/opt/emqx/log", "/opt/emqx/data", "/opt/emqx/etc"]
+## NOTE: /opt/emqx/etc is removed from the VOLUME list since 4.3.13
+VOLUME ["/opt/emqx/log", "/opt/emqx/data"]
 
 # emqx will occupy these port:
 # - 1883 port for MQTT

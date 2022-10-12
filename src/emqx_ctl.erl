@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2017-2021 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2017-2022 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -56,8 +56,6 @@
         , terminate/2
         , code_change/3
         ]).
-
--elvis([{elvis_style, invalid_dynamic_call, #{ignore => [emqx_ctl]}}]).
 
 -record(state, {seq = 0}).
 
@@ -183,7 +181,6 @@ handle_call({register_command, Cmd, MF, Opts}, _From, State = #state{seq = Seq})
     case ets:match(?CMD_TAB, {{'$1', Cmd}, '_', '_'}) of
         [] -> ets:insert(?CMD_TAB, {{Seq, Cmd}, MF, Opts});
         [[OriginSeq] | _] ->
-            ?LOG(warning, "CMD ~s is overidden by ~p", [Cmd, MF]),
             true = ets:insert(?CMD_TAB, {{OriginSeq, Cmd}, MF, Opts})
     end,
     {reply, ok, next_seq(State)};

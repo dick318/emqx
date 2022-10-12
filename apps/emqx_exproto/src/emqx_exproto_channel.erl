@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2020-2021 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2020-2022 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -66,7 +66,7 @@
 
 -opaque(channel() :: #channel{}).
 
--type(conn_state() :: idle | connecting | connected | disconnected).
+-type(conn_state() :: idle | connecting | connected | disconnected | accepted).
 
 -type(reply() :: {outgoing, binary()}
                | {outgoing, [binary()]}
@@ -76,7 +76,8 @@
 
 -define(TIMER_TABLE, #{
           alive_timer => keepalive,
-          force_timer => force_close
+          force_timer => force_close,
+          idle_timer => force_close_idle
          }).
 
 -define(INFO_KEYS, [conninfo, conn_state, clientinfo, session, will_msg]).
@@ -94,8 +95,7 @@
          awaiting_rel_max
         ]).
 
--define(CHANMOCK(P), {exproto_anonymous_client, P}).
--define(CHAN_CONN_TAB, emqx_channel_conn).
+-define(DEFAULT_IDLE_TIMEOUT, 30000).
 
 %%--------------------------------------------------------------------
 %% Info, Attrs and Caps
@@ -151,26 +151,52 @@ init(ConnInfo = #{socktype := Socktype,
                   peercert := Peercert}, Options) ->
     GRpcChann = proplists:get_value(handler, Options),
     NConnInfo = default_conninfo(ConnInfo),
-    ClientInfo = default_clientinfo(ConnInfo),
+    ClientInfo = default_clientinfo(NConnInfo),
+
+    IdleTimeout = proplists:get_value(idle_timeout, Options, ?DEFAULT_IDLE_TIMEOUT),
+
+    NConnInfo1 = NConnInfo#{idle_timeout => IdleTimeout},
     Channel = #channel{gcli = #{channel => GRpcChann},
-                       conninfo = NConnInfo,
+                       conninfo = NConnInfo1,
                        clientinfo = ClientInfo,
-                       conn_state = connecting,
+                       conn_state = accepted,
                        timers = #{}
                       },
     case emqx_hooks:run_fold('client.connect', [NConnInfo], #{}) of
         {error, _Reason} ->
             throw(nopermission);
         _ ->
-            ConnMod = maps:get(conn_mod, NConnInfo),
-            true = ets:insert(?CHAN_CONN_TAB, {?CHANMOCK(self()), ConnMod}),
+            ok = register_the_anonymous_client(ClientInfo, NConnInfo),
             Req = #{conninfo =>
                     peercert(Peercert,
                              #{socktype => socktype(Socktype),
                                peername => address(Peername),
                                sockname => address(Sockname)})},
-            try_dispatch(on_socket_created, wrap(Req), Channel)
+            start_idle_checking_timer(
+              try_dispatch(on_socket_created, wrap(Req), Channel))
     end.
+
+register_the_anonymous_client(ClientInfo, ConnInfo) ->
+    ClientId = maps:get(clientid, ClientInfo),
+    case emqx_cm:open_session(true, ClientInfo, ConnInfo) of
+        {ok, _} ->
+            ?LOG(debug, "Registered an anonymous connection, "
+                        "temporary clientid: ~s", [ClientId]),
+            emqx_logger:set_metadata_clientid(ClientId),
+            _ = self() ! {event, accepted},
+            ok;
+        {error, Reason} ->
+            throw({register_anonymous_error, Reason})
+    end.
+
+unregister_the_anonymous_client(ClientId) ->
+    emqx_cm:unregister_channel(ClientId).
+
+start_idle_checking_timer(Channel = #channel{conninfo = #{socktype := udp}}) ->
+    ensure_timer(idle_timer, Channel);
+
+start_idle_checking_timer(Channel) ->
+    Channel.
 
 %% @private
 peercert(NoSsl, ConnInfo) when NoSsl == nossl;
@@ -248,11 +274,17 @@ handle_timeout(_TRef, {keepalive, StatVal},
             {ok, reset_timer(alive_timer, NChannel)};
         {error, timeout} ->
             Req = #{type => 'KEEPALIVE'},
-            {ok, try_dispatch(on_timer_timeout, wrap(Req), Channel)}
+            NChannel = clean_timer(alive_timer, Channel),
+            %% close connection if keepalive timeout
+            Replies = [{event, disconnected}, {close, normal}],
+            {ok, Replies, try_dispatch(on_timer_timeout, wrap(Req), NChannel)}
     end;
 
 handle_timeout(_TRef, force_close, Channel = #channel{closed_reason = Reason}) ->
     {shutdown, Reason, Channel};
+
+handle_timeout(_TRef, force_close_idle, Channel) ->
+    {shutdown, idle_timeout, Channel};
 
 handle_timeout(_TRef, Msg, Channel) ->
     ?WARN("Unexpected timeout: ~p", [Msg]),
@@ -274,27 +306,25 @@ handle_call(close, Channel) ->
 handle_call({auth, ClientInfo, _Password}, Channel = #channel{conn_state = connected}) ->
     ?LOG(warning, "Duplicated authorized command, dropped ~p", [ClientInfo]),
     {reply, {error, ?RESP_PERMISSION_DENY, <<"Duplicated authenticate command">>}, Channel};
-handle_call({auth, ClientInfo0, Password},
+handle_call({auth, RequestedClientInfo, Password},
             Channel = #channel{conninfo = ConnInfo,
-                               clientinfo = ClientInfo}) ->
-    ClientInfo1 = enrich_clientinfo(ClientInfo0, ClientInfo),
-    NConnInfo = enrich_conninfo(ClientInfo0, ConnInfo),
+                               clientinfo = ClientInfo0}) ->
+    ClientInfo1 = enrich_clientinfo(RequestedClientInfo, ClientInfo0),
+    NConnInfo = enrich_conninfo(RequestedClientInfo, ConnInfo),
 
     Channel1 = Channel#channel{conninfo = NConnInfo,
                                clientinfo = ClientInfo1},
-
     #{clientid := ClientId, username := Username} = ClientInfo1,
 
     case emqx_access_control:authenticate(ClientInfo1#{password => Password}) of
         {ok, AuthResult} ->
             emqx_logger:set_metadata_clientid(ClientId),
-            is_anonymous(AuthResult) andalso
-                emqx_metrics:inc('client.auth.anonymous'),
             NClientInfo = maps:merge(ClientInfo1, AuthResult),
             NChannel = Channel1#channel{clientinfo = NClientInfo},
-            clean_anonymous_clients(),
             case emqx_cm:open_session(true, NClientInfo, NConnInfo) of
                 {ok, _Session} ->
+                    AnonymousClientId = maps:get(clientid, ClientInfo0),
+                    unregister_the_anonymous_client(AnonymousClientId),
                     ?LOG(debug, "Client ~s (Username: '~s') authorized successfully!",
                                 [ClientId, Username]),
                     {reply, ok, [{event, connected}], ensure_connected(NChannel)};
@@ -317,7 +347,8 @@ handle_call({start_timer, keepalive, Interval},
     NConnInfo = ConnInfo#{keepalive => Interval},
     NClientInfo = ClientInfo#{keepalive => Interval},
     NChannel = Channel#channel{conninfo = NConnInfo, clientinfo = NClientInfo},
-    {reply, ok, ensure_keepalive(NChannel)};
+    {reply, ok, [{event, updated}],
+     ensure_keepalive(cancel_timer(idle_timer, NChannel))};
 
 handle_call({subscribe, TopicFilter, Qos},
             Channel = #channel{
@@ -329,13 +360,13 @@ handle_call({subscribe, TopicFilter, Qos},
             {reply, {error, ?RESP_PERMISSION_DENY, <<"ACL deny">>}, Channel};
         _ ->
             {ok, NChannel} = do_subscribe([{TopicFilter, #{qos => Qos}}], Channel),
-            {reply, ok, NChannel}
+            {reply, ok, [{event, updated}], NChannel}
     end;
 
 handle_call({unsubscribe, TopicFilter},
             Channel = #channel{conn_state = connected}) ->
     {ok, NChannel} = do_unsubscribe([{TopicFilter, #{}}], Channel),
-    {reply, ok, NChannel};
+    {reply, ok, [{event, updated}], NChannel};
 
 handle_call({publish, Topic, Qos, Payload},
             Channel = #channel{
@@ -352,7 +383,10 @@ handle_call({publish, Topic, Qos, Payload},
     end;
 
 handle_call(kick, Channel) ->
-    {shutdown, kicked, ok, Channel};
+    {reply, ok, [{event, disconnected}, {close, kicked}], Channel};
+
+handle_call(discard, Channel) ->
+    {shutdown, discarded, ok, Channel};
 
 handle_call(Req, Channel) ->
     ?LOG(warning, "Unexpected call: ~p", [Req]),
@@ -406,15 +440,8 @@ handle_info(Info, Channel) ->
 
 -spec(terminate(any(), channel()) -> channel()).
 terminate(Reason, Channel) ->
-    clean_anonymous_clients(),
     Req = #{reason => stringfy(Reason)},
     try_dispatch(on_socket_closed, wrap(Req), Channel).
-
-is_anonymous(#{anonymous := true}) -> true;
-is_anonymous(_AuthResult)          -> false.
-
-clean_anonymous_clients() ->
-    ets:delete(?CHAN_CONN_TAB, ?CHANMOCK(self())).
 
 packet_to_message(Topic, Qos, Payload,
                   #channel{
@@ -554,6 +581,12 @@ reset_timer(Name, Channel) ->
 clean_timer(Name, Channel = #channel{timers = Timers}) ->
     Channel#channel{timers = maps:remove(Name, Timers)}.
 
+cancel_timer(Name, Channel = #channel{timers = Timers}) ->
+    emqx_misc:cancel_timer(maps:get(Name, Timers, undefined)),
+    clean_timer(Name, Channel).
+
+interval(idle_timer, #channel{conninfo = #{idle_timeout := IdleTimeout}}) ->
+    IdleTimeout;
 interval(force_timer, _) ->
     15000;
 interval(alive_timer, #channel{keepalive = Keepalive}) ->
@@ -602,28 +635,40 @@ enrich_clientinfo(InClientInfo = #{proto_name := ProtoName}, ClientInfo) ->
     NClientInfo = maps:merge(ClientInfo, maps:with(Ks, InClientInfo)),
     NClientInfo#{protocol => ProtoName}.
 
-default_conninfo(ConnInfo) ->
+default_conninfo(ConnInfo =
+                 #{peername := {PeerHost, PeerPort}}) ->
     ConnInfo#{clean_start => true,
-              clientid => undefined,
+              clientid => anonymous_clientid(PeerHost, PeerPort),
               username => undefined,
               conn_props => #{},
               connected => true,
+              proto_name => <<"exproto">>,
+              proto_ver => <<"1.0">>,
               connected_at => erlang:system_time(millisecond),
               keepalive => 0,
               receive_maximum => 0,
               expiry_interval => 0}.
 
 default_clientinfo(#{peername := {PeerHost, _},
-                     sockname := {_, SockPort}}) ->
+                     sockname := {_, SockPort},
+                     clientid := ClientId
+                    }) ->
     #{zone         => external,
-      protocol     => undefined,
+      protocol     => exproto,
       peerhost     => PeerHost,
       sockport     => SockPort,
-      clientid     => undefined,
+      clientid     => ClientId,
       username     => undefined,
       is_bridge    => false,
       is_superuser => false,
       mountpoint   => undefined}.
+
+anonymous_clientid(PeerHost, PeerPort) ->
+    iolist_to_binary(
+      ["exproto-anonymous-",
+       inet:ntoa(PeerHost), "-", integer_to_list(PeerPort),
+       "-", emqx_rule_id:gen()
+      ]).
 
 stringfy(Reason) ->
     unicode:characters_to_binary((io_lib:format("~0p", [Reason]))).

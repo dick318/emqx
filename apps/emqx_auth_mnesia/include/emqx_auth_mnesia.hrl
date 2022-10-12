@@ -13,6 +13,12 @@
 -type(created_at():: integer()).
 
 -record(emqx_user, {
+          login,
+          password,
+          created_at
+        }).
+
+-type(emqx_user() :: #emqx_user{
           login :: login(),
           password :: binary(),
           created_at :: created_at()
@@ -41,15 +47,3 @@
          }).
 
 -type(acl_record() :: {acl_target(), emqx_topic:topic(), action(), access(), created_at()}).
-
--record(auth_metrics, {
-        success = 'client.auth.success',
-        failure = 'client.auth.failure',
-        ignore = 'client.auth.ignore'
-    }).
-
--define(METRICS(Type), tl(tuple_to_list(#Type{}))).
--define(METRICS(Type, K), #Type{}#Type.K).
-
--define(AUTH_METRICS, ?METRICS(auth_metrics)).
--define(AUTH_METRICS(K), ?METRICS(auth_metrics, K)).

@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2020-2021 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2020-2022 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -49,7 +49,6 @@ load_auth_hook(AuthCmd) ->
                timeout => Timeout,
                type => Type,
                pool => ?APP},
-    ok = emqx_auth_redis:register_metrics(),
     emqx:hook('client.authenticate', fun emqx_auth_redis:check/3, [Config]).
 
 load_acl_hook(AclCmd) ->
@@ -66,4 +65,3 @@ if_cmd_enabled(Par, Fun) ->
         {ok, Cmd} -> Fun(Cmd);
         undefined -> ok
     end.
-

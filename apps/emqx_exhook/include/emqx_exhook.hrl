@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2020-2021 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2020-2022 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -40,5 +40,7 @@
       , {'message.acked',       {emqx_exhook_handler, on_message_acked,        []}}
       , {'message.dropped',     {emqx_exhook_handler, on_message_dropped,      []}}
       ]).
+
+-define(DEFAULT_HOOK_PRIORITY, 0).
 
 -endif.

@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2020-2021 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2020-2022 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -185,7 +185,6 @@ confs_to_binary(Confs) ->
 
 -endif.
 
--dialyzer([{nowarn_function, [import_rules/1, import_rule/1]}]).
 import_rule(#{<<"id">> := RuleId,
               <<"rawsql">> := RawSQL,
               <<"actions">> := Actions,
@@ -206,6 +205,22 @@ import_rule(#{<<"id">> := RuleId,
 map_to_actions(Maps) ->
     [map_to_action(M) || M <- Maps].
 
+map_to_action(Map = #{<<"id">> := ActionInstId,
+                      <<"name">> := <<"data_to_kafka">>,
+                      <<"args">> := Args}) ->
+    NArgs =
+        case maps:get(<<"strategy">>, Args, undefined) of
+            <<"first_key_dispatch">> ->
+                %% Old version(4.2.x) is first_key_dispatch.
+                %% Now is key_dispatch.
+                Args#{<<"strategy">> => <<"key_dispatch">>};
+            _ ->
+                Args
+        end,
+    #{id => ActionInstId,
+      name => 'data_to_kafka',
+      args => NArgs,
+      fallbacks => map_to_actions(maps:get(<<"fallbacks">>, Map, []))};
 map_to_action(Map = #{<<"id">> := ActionInstId, <<"name">> := Name, <<"args">> := Args}) ->
     #{id => ActionInstId,
       name => any_to_atom(Name),
@@ -521,7 +536,6 @@ do_import_acl_mnesia(Acls) ->
                   end, Acls).
 
 -ifdef(EMQX_ENTERPRISE).
--dialyzer({nowarn_function, [import_modules/1]}).
 import_modules(Modules) ->
     case ets:info(emqx_modules) of
         undefined ->
@@ -657,24 +671,36 @@ import(Filename, OverridesJson) ->
 -endif.
 
 do_import_data(Data, Version) ->
-    do_import_extra_data(Data, Version),
     import_resources_and_rules(maps:get(<<"resources">>, Data, []), maps:get(<<"rules">>, Data, []), Version),
     import_blacklist(maps:get(<<"blacklist">>, Data, [])),
     import_applications(maps:get(<<"apps">>, Data, [])),
     import_users(maps:get(<<"users">>, Data, [])),
+    %% Import modules first to ensure the data of auth_mnesia module can be imported.
+    %% XXX: In opensource version, can't import if the emqx_auth_mnesia plug-in is not started??
+    do_import_enterprise_modules(Data, Version),
     import_auth_clientid(maps:get(<<"auth_clientid">>, Data, [])),
     import_auth_username(maps:get(<<"auth_username">>, Data, [])),
     import_auth_mnesia(maps:get(<<"auth_mnesia">>, Data, [])),
-    import_acl_mnesia(maps:get(<<"acl_mnesia">>, Data, [])).
+    import_acl_mnesia(maps:get(<<"acl_mnesia">>, Data, [])),
+    %% always do extra import at last, to make sure resources are initiated before
+    %% creating the schemas
+    do_import_extra_data(Data, Version).
 
 -ifdef(EMQX_ENTERPRISE).
 do_import_extra_data(Data, _Version) ->
     _ = import_confs(maps:get(<<"configs">>, Data, []), maps:get(<<"listeners_state">>, Data, [])),
-    _ = import_modules(maps:get(<<"modules">>, Data, [])),
     _ = import_schemas(maps:get(<<"schemas">>, Data, [])),
     ok.
 -else.
 do_import_extra_data(_Data, _Version) -> ok.
+-endif.
+
+-ifdef(EMQX_ENTERPRISE).
+do_import_enterprise_modules(Data, _Version) ->
+    _ = import_modules(maps:get(<<"modules">>, Data, [])),
+    ok.
+-else.
+do_import_enterprise_modules(_Data, _Version) -> ok.
 -endif.
 
 covert_empty_headers([]) -> #{};

@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2020-2021 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2020-2022 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -123,8 +123,6 @@
 -define(MAX_ROW_LIMIT, 10000).
 
 -define(APP, emqx_management).
-
--elvis([{elvis_style, god_modules, disable}]).
 %%--------------------------------------------------------------------
 %% Node Info
 %%--------------------------------------------------------------------
@@ -138,13 +136,13 @@ list_nodes() ->
 lookup_node(Node) -> node_info(Node).
 
 node_info(Node) when Node =:= node() ->
-    Memory  = emqx_vm:get_memory(),
+    {UsedRatio, Total} = get_sys_memory(),
     Info = maps:from_list([{K, list_to_binary(V)} || {K, V} <- emqx_vm:loads()]),
     BrokerInfo = emqx_sys:info(),
     Info#{node              => node(),
           otp_release       => iolist_to_binary(otp_rel()),
-          memory_total      => proplists:get_value(allocated, Memory),
-          memory_used       => proplists:get_value(used, Memory),
+          memory_total      => Total,
+          memory_used       => erlang:round(Total * UsedRatio),
           process_available => erlang:system_info(process_limit),
           process_used      => erlang:system_info(process_count),
           max_fds           =>
@@ -157,6 +155,14 @@ node_info(Node) when Node =:= node() ->
           };
 node_info(Node) ->
     rpc_call(Node, node_info, [Node]).
+
+get_sys_memory() ->
+    case os:type() of
+        {unix, linux} ->
+            load_ctl:get_sys_memory();
+        _ ->
+            {0, 0}
+    end.
 
 stopped_node_info(Node) ->
     #{name => Node, node_status => 'Stopped'}.
@@ -452,7 +458,7 @@ list_listeners(Node) when Node =:= node() ->
     end, esockd:listeners()),
     Http = lists:map(fun({Protocol, Opts}) ->
         #{protocol        => Protocol,
-          listen_on       => proplists:get_value(port, Opts),
+          listen_on       => format_http_bind(Opts),
           acceptors       => maps:get( num_acceptors
                                      , proplists:get_value(transport_options, Opts, #{}), 0),
           max_conns       => proplists:get_value(max_connections, Opts),
@@ -522,7 +528,7 @@ delete_banned(Who) ->
 
 
 %%--------------------------------------------------------------------
-%% Telemtry API
+%% Telemetry API
 %%--------------------------------------------------------------------
 
 -ifndef(EMQX_ENTERPRISE).
@@ -564,7 +570,7 @@ item(route, {Topic, Node}) ->
     #{topic => Topic, node => Node}.
 
 %%--------------------------------------------------------------------
-%% Internel Functions.
+%% Internal Functions.
 %%--------------------------------------------------------------------
 
 rpc_call(Node, Fun, Args) ->
@@ -597,3 +603,10 @@ max_row_limit() ->
     application:get_env(?APP, max_row_limit, ?MAX_ROW_LIMIT).
 
 table_size(Tab) -> ets:info(Tab, size).
+
+format_http_bind(Opts) ->
+    Port = proplists:get_value(port, Opts),
+    case proplists:get_value(ip, Opts) of
+        undefined -> Port;
+        IP -> {IP, Port}
+    end.

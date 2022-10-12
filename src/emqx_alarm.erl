@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2020-2021 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2020-2022 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -39,6 +39,8 @@
         , deactivate/1
         , deactivate/2
         , delete_all_deactivated_alarms/0
+        , ensure_deactivated/1
+        , ensure_deactivated/2
         , get_alarms/0
         , get_alarms/1
         ]).
@@ -132,6 +134,24 @@ activate(Name) ->
 activate(Name, Details) ->
     gen_server:call(?MODULE, {activate_alarm, Name, Details}).
 
+-spec ensure_deactivated(binary() | atom()) -> ok.
+ensure_deactivated(Name) ->
+    ensure_deactivated(Name, no_details).
+
+-spec ensure_deactivated(binary() | atom(), atom() | map()) -> ok.
+ensure_deactivated(Name, Data) ->
+    %% this duplicates the dirty read in handle_call,
+    %% intention is to avoid making gen_server calls when there is no alarm
+    case mnesia:dirty_read(?ACTIVATED_ALARM, Name) of
+        [] ->
+            ok;
+        _ ->
+            case deactivate(Name, Data) of
+                {error, not_found} -> ok;
+                Other -> Other
+            end
+    end.
+
 deactivate(Name) ->
     gen_server:call(?MODULE, {deactivate_alarm, Name, no_details}).
 
@@ -171,10 +191,8 @@ init([Opts]) ->
                                     size_limit = SizeLimit,
                                     validity_period = ValidityPeriod})}.
 
-%% suppress dialyzer warning due to dirty read/write race condition.
 %% TODO: change from dirty_read/write to transactional.
 %% TODO: handle mnesia write errors.
--dialyzer([{nowarn_function, [handle_call/3]}]).
 handle_call({activate_alarm, Name, Details}, _From, State = #state{actions = Actions}) ->
     case mnesia:dirty_read(?ACTIVATED_ALARM, Name) of
         [#activated_alarm{name = Name}] ->

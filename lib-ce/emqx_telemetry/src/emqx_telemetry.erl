@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2020-2021 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2020-2022 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -133,12 +133,6 @@ get_telemetry() ->
 %% gen_server callbacks
 %%--------------------------------------------------------------------
 
-%% This is to suppress dialyzer warnings for mnesia:dirty_write and
-%% dirty_read race condition. Given that the init function is not evaluated
-%% concurrently in one node, it should be free of race condition.
-%% Given the chance of having two nodes bootstraping with the write
-%% is very small, it should be safe to ignore.
--dialyzer([{nowarn_function, [init/1]}]).
 init([Opts]) ->
     State = #state{url = get_value(url, Opts),
                    report_interval = timer:seconds(get_value(report_interval, Opts))},
@@ -367,7 +361,9 @@ report_telemetry(State = #state{url = URL}) ->
     end.
 
 httpc_request(Method, URL, Headers, Body) ->
-    httpc:request(Method, {URL, Headers, "application/json", Body}, [], []).
+    HTTPOptions = [{timeout, timer:seconds(10)}, {ssl, [{verify, verify_none}]}],
+    Options = [],
+    httpc:request(Method, {URL, Headers, "application/json", Body}, HTTPOptions, Options).
 
 ignore_lib_apps(Apps) ->
     LibApps = [kernel, stdlib, sasl, appmon, eldap, erts,

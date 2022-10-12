@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2021 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2021-2022 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -96,8 +96,8 @@ do_parse(URI) ->
 %% underscores replaced with hyphens
 %% NOTE: assuming the input Headers list is a proplists,
 %% that is, when a key is duplicated, list header overrides tail
-%% e.g. [{"Content_Type", "applicaiton/binary"}, {<<"content-type">>, "applicaiton/json"}]
-%% results in: [{"content-type", "applicaiton/binary"}]
+%% e.g. [{"Content_Type", "applicaiton/binary"}, {"content-type", "applicaiton/json"}]
+%% results in: [{<<"content-type">>, "applicaiton/binary"}]
 normalise_headers(Headers0) ->
     F = fun({K0, V}) ->
                 K = re:replace(K0, "_", "-", [{return,binary}]),

@@ -17,6 +17,8 @@ image:
 ## Forces the recreation of pods during helm upgrades. This can be useful to update configuration values even if the container image did not change.
 recreatePods: false
 
+podAnnotations: {}
+
 # Pod deployment policy
 # value: OrderedReady | Parallel
 # To redeploy a chart with existing PVC(s), the value must be set to Parallel to avoid deadlock
@@ -70,6 +72,8 @@ initContainers: {}
 
 ## EMQX configuration item, see the documentation (https://hub.docker.com/r/emqx/emqx)
 emqxConfig:
+  EMQX_MANAGEMENT__DEFAULT_APPLICATION__ID: "admin"
+  EMQX_MANAGEMENT__DEFAULT_APPLICATION__SECRET: "public"
   EMQX_CLUSTER__K8S__APISERVER: "https://kubernetes.default.svc:443"
   ## The address type is used to extract host from k8s service.
   ## Value: ip | dns | hostname
@@ -195,6 +199,7 @@ ingress:
       # kubernetes.io/ingress.class: nginx
       # kubernetes.io/tls-acme: "true"
     path: /
+    pathType: ImplementationSpecific
     hosts:
     - dashboard.emqx.local
     tls: []
@@ -206,6 +211,7 @@ ingress:
       # kubernetes.io/ingress.class: nginx
       # kubernetes.io/tls-acme: "true"
     path: /
+    pathType: ImplementationSpecific
     hosts:
     - api.emqx.local
     tls: []
@@ -228,6 +234,7 @@ ingress:
       # nginx.ingress.kubernetes.io/use-proxy-protocol: "false"
       # nginx.ingress.kubernetes.io/proxy-protocol-header-timeout: "5s"
     path: /mqtt
+    pathType: ImplementationSpecific
     # path: /wss(\/.*)?
     hosts:
     - wss.emqx.local
@@ -245,3 +252,7 @@ containerSecurityContext:
   enabled: true
   runAsNonRoot: true
   runAsUser: 1000
+
+metrics:
+  enabled: false
+  type: prometheus

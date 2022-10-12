@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2018-2021 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2018-2022 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -53,11 +53,12 @@ t_check_sub(_) ->
                },
     emqx_zone:set_env(zone, '$mqtt_sub_caps', SubCaps),
     timer:sleep(50),
-    ok = emqx_mqtt_caps:check_sub(zone, <<"topic">>, SubOpts),
+    ClientInfo = #{zone => zone},
+    ok = emqx_mqtt_caps:check_sub(ClientInfo, <<"topic">>, SubOpts),
     ?assertEqual({error, ?RC_TOPIC_FILTER_INVALID},
-                 emqx_mqtt_caps:check_sub(zone, <<"a/b/c/d">>, SubOpts)),
+                 emqx_mqtt_caps:check_sub(ClientInfo, <<"a/b/c/d">>, SubOpts)),
     ?assertEqual({error, ?RC_WILDCARD_SUBSCRIPTIONS_NOT_SUPPORTED},
-                 emqx_mqtt_caps:check_sub(zone, <<"+/#">>, SubOpts)),
+                 emqx_mqtt_caps:check_sub(ClientInfo, <<"+/#">>, SubOpts)),
     ?assertEqual({error, ?RC_SHARED_SUBSCRIPTIONS_NOT_SUPPORTED},
-                 emqx_mqtt_caps:check_sub(zone, <<"topic">>, SubOpts#{share => true})),
+                 emqx_mqtt_caps:check_sub(ClientInfo, <<"topic">>, SubOpts#{share => true})),
     emqx_zone:unset_env(zone, '$mqtt_pub_caps').
