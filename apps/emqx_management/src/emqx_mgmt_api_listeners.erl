@@ -18,372 +18,826 @@
 
 -behaviour(minirest_api).
 
--export([api_spec/0]).
+-export([namespace/0, api_spec/0, paths/0, schema/1, fields/1]).
+-import(emqx_dashboard_swagger, [error_codes/2, error_codes/1]).
 
--export([ list_listeners/2
-        , crud_listeners_by_id/2
-        , list_listeners_on_node/2
-        , crud_listener_by_id_on_node/2
-        , manage_listeners/2
-        , jsonable_resp/2
-        ]).
+-export([
+    listener_type_status/2,
+    list_listeners/2,
+    crud_listeners_by_id/2,
+    stop_listeners_by_id/2,
+    start_listeners_by_id/2,
+    restart_listeners_by_id/2,
+    action_listeners_by_id/2
+]).
 
--export([format/1]).
+%% for rpc call
+-export([
+    do_list_listeners/0
+]).
 
 -include_lib("emqx/include/emqx.hrl").
+-include_lib("hocon/include/hoconsc.hrl").
 
 -define(NODE_LISTENER_NOT_FOUND, <<"Node name or listener id not found">>).
 -define(NODE_NOT_FOUND_OR_DOWN, <<"Node not found or Down">>).
 -define(LISTENER_NOT_FOUND, <<"Listener id not found">>).
+-define(LISTENER_ID_INCONSISTENT, <<"Path and body's listener id not match">>).
 -define(ADDR_PORT_INUSE, <<"Addr port in use">>).
--define(CONFIG_SCHEMA_ERROR, <<"Config schema error">>).
--define(INVALID_LISTENER_PROTOCOL, <<"Invalid listener type">>).
--define(UPDATE_CONFIG_FAILED, <<"Update configuration failed">>).
--define(OPERATION_FAILED, <<"Operation failed">>).
+-define(OPTS(_OverrideTo_), #{rawconf_with_defaults => true, override_to => _OverrideTo_}).
+
+namespace() -> "listeners".
 
 api_spec() ->
-    {
-        [
-            api_list_listeners(),
-            api_list_update_listeners_by_id(),
-            api_manage_listeners(),
-            api_list_listeners_on_node(),
-            api_get_update_listener_by_id_on_node(),
-            api_manage_listeners_on_node()
-        ],
-        []
-    }.
+    emqx_dashboard_swagger:spec(?MODULE, #{check_schema => true}).
 
--define(TYPES_ATOM, [tcp, ssl, ws, wss, quic]).
-req_schema() ->
-    Schema = [emqx_mgmt_api_configs:gen_schema(
-        emqx:get_raw_config([listeners, T, default], #{}))
-     || T <- ?TYPES_ATOM],
-    #{'oneOf' => Schema}.
+paths() ->
+    [
+        "/listeners_status",
+        "/listeners",
+        "/listeners/:id",
+        "/listeners/:id/stop",
+        "/listeners/:id/start",
+        "/listeners/:id/restart"
+    ].
 
-resp_schema() ->
-    #{'oneOf' := Schema} = req_schema(),
-    AddMetadata = fun(Prop) ->
-        Prop#{running => #{type => boolean},
-              id => #{type => string},
-              node => #{type => string}}
-    end,
-    Schema1 = [S#{properties => AddMetadata(Prop)}
-               || S = #{properties := Prop} <- Schema],
-    #{'oneOf' => Schema1}.
-
-api_list_listeners() ->
-    Metadata = #{
+schema("/listeners_status") ->
+    #{
+        'operationId' => listener_type_status,
         get => #{
-            description => <<"List listeners from all nodes in the cluster">>,
+            tags => [<<"listeners">>],
+            desc => <<"List all running node's listeners live status. group by listener type">>,
             responses => #{
-                <<"200">> =>
-                    emqx_mgmt_util:array_schema(resp_schema(),
-                                                <<"List listeners successfully">>)}}},
-    {"/listeners", Metadata, list_listeners}.
-
-api_list_update_listeners_by_id() ->
-    Metadata = #{
+                200 =>
+                    emqx_dashboard_swagger:schema_with_example(
+                        ?ARRAY(?R_REF(listener_type_status)),
+                        listener_type_status_example()
+                    )
+            }
+        }
+    };
+schema("/listeners") ->
+    #{
+        'operationId' => list_listeners,
         get => #{
-            description => <<"List listeners by a given Id from all nodes in the cluster">>,
-            parameters => [param_path_id()],
+            tags => [<<"listeners">>],
+            desc => <<"List all running node's listeners for the specified type.">>,
+            parameters => [
+                {type,
+                    ?HOCON(
+                        ?ENUM(listeners_type()),
+                        #{desc => "Listener type", in => query, required => false, example => tcp}
+                    )}
+            ],
             responses => #{
-                <<"404">> =>
-                    emqx_mgmt_util:error_schema(?LISTENER_NOT_FOUND, ['BAD_LISTENER_ID']),
-                <<"200">> =>
-                    emqx_mgmt_util:array_schema(resp_schema(), <<"List listeners successfully">>)}},
-        put => #{
-            description =>
-                <<"Create or update a listener by a given Id to all nodes in the cluster">>,
-            parameters => [param_path_id()],
-            'requestBody' => emqx_mgmt_util:schema(req_schema(), <<"Listener Config">>),
-            responses => #{
-                <<"400">> =>
-                    emqx_mgmt_util:error_schema(?UPDATE_CONFIG_FAILED,
-                                                ['BAD_LISTENER_ID', 'BAD_CONFIG_SCHEMA']),
-                <<"404">> =>
-                    emqx_mgmt_util:error_schema(?LISTENER_NOT_FOUND, ['BAD_LISTENER_ID']),
-                <<"500">> =>
-                    emqx_mgmt_util:error_schema(?OPERATION_FAILED, ['INTERNAL_ERROR']),
-                <<"200">> =>
-                    emqx_mgmt_util:array_schema(resp_schema(),
-                                                <<"Create or update listener successfully">>)}},
-        delete => #{
-            description => <<"Delete a listener by a given Id to all nodes in the cluster">>,
-            parameters => [param_path_id()],
-            responses => #{
-                <<"404">> =>
-                    emqx_mgmt_util:error_schema(?LISTENER_NOT_FOUND, ['BAD_LISTENER_ID']),
-                <<"204">> =>
-                    emqx_mgmt_util:schema(<<"Delete listener successfully">>)}}
-    },
-    {"/listeners/:id", Metadata, crud_listeners_by_id}.
-
-api_list_listeners_on_node() ->
-    Metadata = #{
-        get => #{
-            description => <<"List listeners in one node">>,
-            parameters => [param_path_node()],
-            responses => #{
-                <<"404">> =>
-                    emqx_mgmt_util:error_schema(?NODE_NOT_FOUND_OR_DOWN, ['RESOURCE_NOT_FOUND']),
-                <<"500">> =>
-                    emqx_mgmt_util:error_schema(?OPERATION_FAILED, ['INTERNAL_ERROR']),
-                <<"200">> =>
-                    emqx_mgmt_util:schema(resp_schema(), <<"List listeners successfully">>)}}},
-    {"/nodes/:node/listeners", Metadata, list_listeners_on_node}.
-
-api_get_update_listener_by_id_on_node() ->
-    Metadata = #{
-        get => #{
-            description => <<"Get a listener by a given Id on a specific node">>,
-            parameters => [param_path_node(), param_path_id()],
-            responses => #{
-                <<"404">> =>
-                    emqx_mgmt_util:error_schema(?NODE_LISTENER_NOT_FOUND,
-                        ['BAD_NODE_NAME', 'BAD_LISTENER_ID']),
-                <<"200">> =>
-                    emqx_mgmt_util:schema(resp_schema(), <<"Get listener successfully">>)}},
-        put => #{
-            description => <<"Create or update a listener by a given Id on a specific node">>,
-            parameters => [param_path_node(), param_path_id()],
-            'requestBody' => emqx_mgmt_util:schema(req_schema(), <<"Listener Config">>),
-            responses => #{
-                <<"400">> =>
-                    emqx_mgmt_util:error_schema(?UPDATE_CONFIG_FAILED,
-                                                ['BAD_LISTENER_ID', 'BAD_CONFIG_SCHEMA']),
-                <<"404">> =>
-                    emqx_mgmt_util:error_schema(?NODE_LISTENER_NOT_FOUND,
-                        ['BAD_NODE_NAME', 'BAD_LISTENER_ID']),
-                <<"500">> =>
-                    emqx_mgmt_util:error_schema(?OPERATION_FAILED, ['INTERNAL_ERROR']),
-                <<"200">> =>
-                    emqx_mgmt_util:schema(resp_schema(), <<"Get listener successfully">>)}},
-        delete => #{
-            description => <<"Delete a listener by a given Id to all nodes in the cluster">>,
-            parameters => [param_path_node(), param_path_id()],
-            responses => #{
-                <<"404">> =>
-                    emqx_mgmt_util:error_schema(?LISTENER_NOT_FOUND, ['BAD_LISTENER_ID']),
-                <<"204">> =>
-                    emqx_mgmt_util:schema(<<"Delete listener successfully">>)}}
-    },
-    {"/nodes/:node/listeners/:id", Metadata, crud_listener_by_id_on_node}.
-
-api_manage_listeners() ->
-    Metadata = #{
+                200 =>
+                    emqx_dashboard_swagger:schema_with_example(
+                        ?ARRAY(?R_REF(listener_id_status)),
+                        listener_id_status_example()
+                    )
+            }
+        },
         post => #{
-            description => <<"Restart listeners on all nodes in the cluster">>,
-            parameters => [
-                param_path_id(),
-                param_path_operation()],
+            tags => [<<"listeners">>],
+            desc => <<"Create the specified listener on all nodes.">>,
+            parameters => [],
+            'requestBody' => create_listener_schema(#{bind => true}),
             responses => #{
-                <<"500">> => emqx_mgmt_util:error_schema(?OPERATION_FAILED, ['INTERNAL_ERROR']),
-                <<"200">> => emqx_mgmt_util:schema(<<"Operation success">>)}}},
-    {"/listeners/:id/operation/:operation", Metadata, manage_listeners}.
-
-api_manage_listeners_on_node() ->
-    Metadata = #{
+                200 => listener_schema(#{bind => true}),
+                400 => error_codes(['BAD_LISTENER_ID', 'BAD_REQUEST'])
+            }
+        }
+    };
+schema("/listeners/:id") ->
+    #{
+        'operationId' => crud_listeners_by_id,
+        get => #{
+            tags => [<<"listeners">>],
+            desc => <<"List all running node's listeners for the specified id.">>,
+            parameters => [?R_REF(listener_id)],
+            responses => #{
+                200 => listener_schema(#{bind => true}),
+                404 => error_codes(['BAD_LISTENER_ID', 'BAD_REQUEST'], ?LISTENER_NOT_FOUND)
+            }
+        },
         put => #{
-            description => <<"Restart listeners on all nodes in the cluster">>,
-            parameters => [
-                param_path_node(),
-                param_path_id(),
-                param_path_operation()],
+            tags => [<<"listeners">>],
+            desc => <<"Update the specified listener on all nodes.">>,
+            parameters => [?R_REF(listener_id)],
+            'requestBody' => listener_schema(#{bind => false}),
             responses => #{
-                <<"500">> => emqx_mgmt_util:error_schema(?OPERATION_FAILED, ['INTERNAL_ERROR']),
-                <<"200">> => emqx_mgmt_util:schema(<<"Operation success">>)}}},
-    {"/nodes/:node/listeners/:id/operation/:operation", Metadata, manage_listeners}.
-
-%%%==============================================================================================
-%% parameters
-param_path_node() ->
+                200 => listener_schema(#{bind => true}),
+                400 => error_codes(['BAD_REQUEST']),
+                404 => error_codes(['BAD_LISTENER_ID', 'BAD_REQUEST'], ?LISTENER_NOT_FOUND)
+            }
+        },
+        post => #{
+            tags => [<<"listeners">>],
+            desc => <<"Create the specified listener on all nodes.">>,
+            parameters => [?R_REF(listener_id)],
+            'requestBody' => listener_schema(#{bind => true}),
+            responses => #{
+                200 => listener_schema(#{bind => true}),
+                400 => error_codes(['BAD_LISTENER_ID', 'BAD_REQUEST'])
+            },
+            deprecated => true
+        },
+        delete => #{
+            tags => [<<"listeners">>],
+            desc => <<"Delete the specified listener on all nodes.">>,
+            parameters => [?R_REF(listener_id)],
+            responses => #{
+                204 => <<"Listener deleted">>,
+                400 => error_codes(['BAD_REQUEST'])
+            }
+        }
+    };
+schema("/listeners/:id/start") ->
     #{
-        name => node,
-        in => path,
-        schema => #{type => string},
-        required => true,
-        example => node()
+        'operationId' => start_listeners_by_id,
+        post => #{
+            tags => [<<"listeners">>],
+            desc => <<"Start the listener on all nodes.">>,
+            parameters => [
+                ?R_REF(listener_id)
+            ],
+            responses => #{
+                200 => <<"Updated">>,
+                400 => error_codes(['BAD_REQUEST', 'BAD_LISTENER_ID'])
+            }
+        }
+    };
+schema("/listeners/:id/stop") ->
+    #{
+        'operationId' => stop_listeners_by_id,
+        post => #{
+            tags => [<<"listeners">>],
+            desc => <<"Stop the listener on all nodes.">>,
+            parameters => [
+                ?R_REF(listener_id)
+            ],
+            responses => #{
+                200 => <<"Updated">>,
+                400 => error_codes(['BAD_REQUEST', 'BAD_LISTENER_ID'])
+            }
+        }
+    };
+schema("/listeners/:id/restart") ->
+    #{
+        'operationId' => restart_listeners_by_id,
+        post => #{
+            tags => [<<"listeners">>],
+            desc => <<"Restart listeners on all nodes.">>,
+            parameters => [
+                ?R_REF(listener_id)
+            ],
+            responses => #{
+                200 => <<"Updated">>,
+                400 => error_codes(['BAD_REQUEST', 'BAD_LISTENER_ID'])
+            }
+        }
     }.
 
-param_path_id() ->
-    #{
-        name => id,
-        in => path,
-        schema => #{type => string, example => emqx_listeners:id_example()},
-        required => true
-    }.
+fields(listener_id) ->
+    [
+        {id,
+            ?HOCON(atom(), #{
+                desc => "Listener id",
+                example => 'tcp:demo',
+                validator => fun validate_id/1,
+                required => true,
+                in => path
+            })}
+    ];
+fields(node) ->
+    [
+        {"node",
+            ?HOCON(atom(), #{
+                desc => "Node name",
+                example => "emqx@127.0.0.1",
+                in => path
+            })}
+    ];
+fields(listener_type_status) ->
+    [
+        {type, ?HOCON(?ENUM(listeners_type()), #{desc => "Listener type", required => true})},
+        {enable, ?HOCON(boolean(), #{desc => "Listener enable", required => true})},
+        {ids, ?HOCON(?ARRAY(string()), #{desc => "Listener Ids", required => true})},
+        {status, ?HOCON(?R_REF(status))},
+        {node_status, ?HOCON(?ARRAY(?R_REF(node_status)))}
+    ];
+fields(listener_id_status) ->
+    fields(listener_id) ++
+        [
+            {type, ?HOCON(?ENUM(listeners_type()), #{desc => "Listener type", required => true})},
+            {name, ?HOCON(string(), #{desc => "Listener name", required => true})},
+            {enable, ?HOCON(boolean(), #{desc => "Listener enable", required => true})},
+            {number, ?HOCON(typerefl:pos_integer(), #{desc => "ListenerId counter"})},
+            {bind,
+                ?HOCON(
+                    emqx_schema:ip_port(),
+                    #{desc => "Listener bind addr", required => true}
+                )},
+            {acceptors, ?HOCON(typerefl:pos_integer(), #{desc => "ListenerId acceptors"})},
+            {status, ?HOCON(?R_REF(status))},
+            {node_status, ?HOCON(?ARRAY(?R_REF(node_status)))}
+        ];
+fields(status) ->
+    [
+        {running,
+            ?HOCON(
+                hoconsc:union([inconsistent, boolean()]),
+                #{desc => "Listener running status", required => true}
+            )},
+        {max_connections,
+            ?HOCON(hoconsc:union([infinity, integer()]), #{desc => "Max connections"})},
+        {current_connections, ?HOCON(non_neg_integer(), #{desc => "Current connections"})}
+    ];
+fields(node_status) ->
+    [
+        {"node",
+            ?HOCON(atom(), #{
+                desc => "Node name",
+                example => "emqx@127.0.0.1"
+            })},
+        {status, ?HOCON(?R_REF(status))}
+    ];
+fields({Type, with_name}) ->
+    listener_struct_with_name(Type);
+fields(Type) ->
+    listener_struct(Type).
 
-param_path_operation()->
-    #{
-        name => operation,
-        in => path,
-        required => true,
-        schema => #{
-            type => string,
-            enum => [start, stop, restart]},
-        example => restart
-    }.
+listener_schema(Opts) ->
+    emqx_dashboard_swagger:schema_with_example(
+        ?UNION(lists:map(fun(#{ref := Ref}) -> Ref end, listeners_info(Opts))),
+        tcp_schema_example()
+    ).
 
-%%%==============================================================================================
+create_listener_schema(Opts) ->
+    Schemas = [
+        ?R_REF(Mod, {Type, with_name})
+     || #{ref := ?R_REF(Mod, Type)} <- listeners_info(Opts)
+    ],
+    Example = maps:remove(id, tcp_schema_example()),
+    emqx_dashboard_swagger:schema_with_example(
+        ?UNION(Schemas),
+        Example#{name => <<"demo">>}
+    ).
+
+listeners_type() ->
+    lists:map(
+        fun({Type, _}) -> list_to_existing_atom(Type) end,
+        hocon_schema:fields(emqx_schema, "listeners")
+    ).
+
+listeners_info(Opts) ->
+    Listeners = hocon_schema:fields(emqx_schema, "listeners"),
+    lists:map(
+        fun({Type, #{type := ?MAP(_Name, ?R_REF(Mod, Field))}}) ->
+            Fields0 = hocon_schema:fields(Mod, Field),
+            Fields1 = lists:keydelete("authentication", 1, Fields0),
+            Fields3 = required_bind(Fields1, Opts),
+            Ref = listeners_ref(Type, Opts),
+            TypeAtom = list_to_existing_atom(Type),
+            #{
+                ref => ?R_REF(Ref),
+                schema => [
+                    {type, ?HOCON(?ENUM([TypeAtom]), #{desc => "Listener type", required => true})},
+                    {running, ?HOCON(boolean(), #{desc => "Listener status", required => false})},
+                    {id,
+                        ?HOCON(atom(), #{
+                            desc => "Listener id",
+                            required => true,
+                            validator => fun validate_id/1
+                        })},
+                    {current_connections,
+                        ?HOCON(
+                            non_neg_integer(),
+                            #{desc => "Current connections", required => false}
+                        )}
+                    | Fields3
+                ]
+            }
+        end,
+        Listeners
+    ).
+
+required_bind(Fields, #{bind := true}) ->
+    Fields;
+required_bind(Fields, #{bind := false}) ->
+    {value, {_, Hocon}, Fields1} = lists:keytake("bind", 1, Fields),
+    [{"bind", Hocon#{required => false}} | Fields1].
+
+listeners_ref(Type, #{bind := Bind}) ->
+    Suffix =
+        case Bind of
+            true -> "_required_bind";
+            false -> "_not_required_bind"
+        end,
+    Type ++ Suffix.
+
+validate_id(Id) ->
+    case emqx_listeners:parse_listener_id(Id) of
+        {error, Reason} -> {error, Reason};
+        {ok, _} -> ok
+    end.
+
 %% api
-list_listeners(get, _Request) ->
-    {200, format(emqx_mgmt:list_listeners())}.
+listener_type_status(get, _Request) ->
+    Listeners = maps:to_list(listener_status_by_type(list_listeners(), #{})),
+    List = lists:map(
+        fun({Type, L}) ->
+            L1 = maps:without([bind, acceptors, name], L),
+            L1#{type => Type}
+        end,
+        Listeners
+    ),
+    {200, List}.
 
-crud_listeners_by_id(get, #{bindings := #{id := Id}}) ->
-    case [L || L = #{id := Id0} <- emqx_mgmt:list_listeners(),
-            atom_to_binary(Id0, latin1) =:= Id] of
-        [] ->
-            {400, #{code => 'RESOURCE_NOT_FOUND', message => ?LISTENER_NOT_FOUND}};
-        Listeners ->
-            {200, format(Listeners)}
-    end;
-crud_listeners_by_id(put, #{bindings := #{id := Id}, body := Conf}) ->
-    Results = format(emqx_mgmt:update_listener(Id, Conf)),
-    case lists:filter(fun filter_errors/1, Results) of
-        [{error, {invalid_listener_id, Id}} | _] ->
-            {400, #{code => 'BAD_REQUEST', message => ?INVALID_LISTENER_PROTOCOL}};
-        [{error, {emqx_conf_schema, _}} | _] ->
-            {400, #{code => 'BAD_REQUEST', message => ?CONFIG_SCHEMA_ERROR}};
-        [{error, {eaddrinuse, _}} | _] ->
-            {400, #{code => 'BAD_REQUEST', message => ?ADDR_PORT_INUSE}};
-        [{error, Reason} | _] ->
-            {500, #{code => 'UNKNOWN_ERROR', message => err_msg(Reason)}};
-        [] ->
-            {200, Results}
-    end;
+list_listeners(get, #{query_string := Query}) ->
+    Listeners = list_listeners(),
+    NodeL =
+        case maps:find(<<"type">>, Query) of
+            {ok, Type} -> listener_type_filter(atom_to_binary(Type), Listeners);
+            error -> Listeners
+        end,
+    {200, listener_status_by_id(NodeL)};
+list_listeners(post, #{body := Body}) ->
+    create_listener(Body).
 
+crud_listeners_by_id(get, #{bindings := #{id := Id0}}) ->
+    Listeners =
+        [
+            Conf#{
+                <<"id">> => Id,
+                <<"type">> => Type,
+                <<"bind">> := iolist_to_binary(
+                    emqx_listeners:format_bind(maps:get(<<"bind">>, Conf))
+                )
+            }
+         || {Id, Type, Conf} <- emqx_listeners:list_raw(),
+            Id =:= Id0
+        ],
+    case Listeners of
+        [] -> {404, #{code => 'BAD_LISTENER_ID', message => ?LISTENER_NOT_FOUND}};
+        [L] -> {200, L}
+    end;
+crud_listeners_by_id(put, #{bindings := #{id := Id}, body := Body0}) ->
+    case parse_listener_conf(Body0) of
+        {Id, Type, Name, Conf} ->
+            Path = [listeners, Type, Name],
+            case emqx_conf:get_raw(Path, undefined) of
+                undefined ->
+                    {404, #{code => 'BAD_LISTENER_ID', message => ?LISTENER_NOT_FOUND}};
+                PrevConf ->
+                    MergeConfT = emqx_map_lib:deep_merge(PrevConf, Conf),
+                    MergeConf = emqx_listeners:ensure_override_limiter_conf(MergeConfT, Conf),
+                    case update(Path, MergeConf) of
+                        {ok, #{raw_config := _RawConf}} ->
+                            crud_listeners_by_id(get, #{bindings => #{id => Id}});
+                        {error, not_found} ->
+                            {404, #{code => 'BAD_LISTENER_ID', message => ?LISTENER_NOT_FOUND}};
+                        {error, Reason} ->
+                            {400, #{code => 'BAD_REQUEST', message => err_msg(Reason)}}
+                    end
+            end;
+        {error, Reason} ->
+            {400, #{code => 'BAD_REQUEST', message => err_msg(Reason)}};
+        _ ->
+            {400, #{code => 'BAD_LISTENER_ID', message => ?LISTENER_ID_INCONSISTENT}}
+    end;
+crud_listeners_by_id(post, #{body := Body}) ->
+    create_listener(Body);
 crud_listeners_by_id(delete, #{bindings := #{id := Id}}) ->
-    Results = emqx_mgmt:remove_listener(Id),
-    case lists:filter(fun filter_errors/1, Results) of
-        [] -> {204};
-        Errors -> {500, #{code => 'UNKNOW_ERROR', message => err_msg(Errors)}}
+    {ok, #{type := Type, name := Name}} = emqx_listeners:parse_listener_id(Id),
+    case ensure_remove([listeners, Type, Name]) of
+        {ok, _} -> {204};
+        {error, Reason} -> {400, #{code => 'BAD_REQUEST', message => err_msg(Reason)}}
     end.
 
-list_listeners_on_node(get, #{bindings := #{node := Node}}) ->
-    case emqx_mgmt:list_listeners(atom(Node)) of
-        {error, nodedown} ->
-            {404, #{code => 'RESOURCE_NOT_FOUND', message => ?NODE_NOT_FOUND_OR_DOWN}};
-        {error, Reason} ->
-            {500, #{code => 'UNKNOW_ERROR', message => err_msg(Reason)}};
-        Listener ->
-            {200, format(Listener)}
+parse_listener_conf(Conf0) ->
+    Conf1 = maps:without([<<"running">>, <<"current_connections">>], Conf0),
+    {TypeBin, Conf2} = maps:take(<<"type">>, Conf1),
+    TypeAtom = binary_to_existing_atom(TypeBin),
+
+    case maps:take(<<"id">>, Conf2) of
+        {IdBin, Conf3} ->
+            {ok, #{type := Type, name := Name}} = emqx_listeners:parse_listener_id(IdBin),
+            case Type =:= TypeAtom of
+                true -> {binary_to_existing_atom(IdBin), TypeAtom, Name, Conf3};
+                false -> {error, listener_type_inconsistent}
+            end;
+        _ ->
+            case maps:take(<<"name">>, Conf2) of
+                {Name, Conf3} ->
+                    IdBin = <<TypeBin/binary, $:, Name/binary>>,
+                    {binary_to_atom(IdBin), TypeAtom, Name, Conf3};
+                _ ->
+                    {error, listener_config_invalid}
+            end
     end.
 
-crud_listener_by_id_on_node(get, #{bindings := #{id := Id, node := Node}}) ->
-    case emqx_mgmt:get_listener(atom(Node), atom(Id)) of
-        {error, not_found} ->
-            {404, #{code => 'RESOURCE_NOT_FOUND', message => ?NODE_LISTENER_NOT_FOUND}};
-        {error, Reason} ->
-            {500, #{code => 'UNKNOW_ERROR', message => err_msg(Reason)}};
-        Listener ->
-            {200, format(Listener)}
-    end;
-crud_listener_by_id_on_node(put, #{bindings := #{id := Id, node := Node}, body := Conf}) ->
-    case emqx_mgmt:update_listener(atom(Node), Id, Conf) of
-        {error, nodedown} ->
-            {404, #{code => 'RESOURCE_NOT_FOUND', message => ?NODE_NOT_FOUND_OR_DOWN}};
-        {error, {invalid_listener_id, _}} ->
-            {400, #{code => 'BAD_REQUEST', message => ?INVALID_LISTENER_PROTOCOL}};
-        {error, {emqx_conf_schema, _}} ->
-            {400, #{code => 'BAD_REQUEST', message => ?CONFIG_SCHEMA_ERROR}};
-        {error, {eaddrinuse, _}} ->
-            {400, #{code => 'BAD_REQUEST', message => ?ADDR_PORT_INUSE}};
-        {error, Reason} ->
-            {500, #{code => 'UNKNOW_ERROR', message => err_msg(Reason)}};
-        Listener ->
-            {200, format(Listener)}
-    end;
-crud_listener_by_id_on_node(delete, #{bindings := #{id := Id, node := Node}}) ->
-    case emqx_mgmt:remove_listener(atom(Node), Id) of
-        ok -> {204};
-        {error, Reason} -> {500, #{code => 'UNKNOW_ERROR', message => err_msg(Reason)}}
-    end.
+stop_listeners_by_id(Method, Body = #{bindings := Bindings}) ->
+    action_listeners_by_id(
+        Method,
+        Body#{bindings := maps:put(action, stop, Bindings)}
+    ).
+start_listeners_by_id(Method, Body = #{bindings := Bindings}) ->
+    action_listeners_by_id(
+        Method,
+        Body#{bindings := maps:put(action, start, Bindings)}
+    ).
+restart_listeners_by_id(Method, Body = #{bindings := Bindings}) ->
+    action_listeners_by_id(
+        Method,
+        Body#{bindings := maps:put(action, restart, Bindings)}
+    ).
 
-manage_listeners(_, #{bindings := #{id := Id, operation := Oper, node := Node}}) ->
-    {_, Result} = do_manage_listeners(Node, Id, Oper),
-    Result;
-
-manage_listeners(_, #{bindings := #{id := Id, operation := Oper}}) ->
-    Results = [do_manage_listeners(Node, Id, Oper) || Node <- mria_mnesia:running_nodes()],
-    case lists:filter(fun({_, {200}}) -> false; (_) -> true end, Results) of
-        [] -> {200};
-        Errors -> {500, #{code => 'UNKNOW_ERROR', message => manage_listeners_err(Errors)}}
+action_listeners_by_id(post, #{bindings := #{id := Id, action := Action}}) ->
+    {ok, #{type := Type, name := Name}} = emqx_listeners:parse_listener_id(Id),
+    Path = [listeners, Type, Name],
+    case emqx_conf:get_raw(Path, undefined) of
+        undefined ->
+            {404, #{code => 'BAD_LISTENER_ID', message => ?LISTENER_NOT_FOUND}};
+        _PrevConf ->
+            case action(Path, Action, enabled(Action)) of
+                {ok, #{raw_config := _RawConf}} ->
+                    {200};
+                {error, not_found} ->
+                    {404, #{code => 'BAD_LISTENER_ID', message => ?LISTENER_NOT_FOUND}};
+                {error, Reason} ->
+                    {400, #{code => 'BAD_REQUEST', message => err_msg(Reason)}}
+            end
     end.
 
 %%%==============================================================================================
-%% util functions
 
-do_manage_listeners(Node, Id, Oper) ->
-    Param = #{node => atom(Node), id => atom(Id)},
-    {Node, do_manage_listeners2(Oper, Param)}.
+enabled(start) -> #{<<"enabled">> => true};
+enabled(stop) -> #{<<"enabled">> => false};
+enabled(restart) -> #{<<"enabled">> => true}.
 
-do_manage_listeners2(<<"start">>, Param) ->
-    case emqx_mgmt:manage_listener(start_listener, Param) of
-        ok -> {200};
-        {error, {already_started, _}} -> {200};
-        {error, Reason} ->
-            {500, #{code => 'UNKNOW_ERROR', message => err_msg(Reason)}}
-    end;
-do_manage_listeners2(<<"stop">>, Param) ->
-    case emqx_mgmt:manage_listener(stop_listener, Param) of
-        ok -> {200};
-        {error, not_found} -> {200};
-        {error, Reason} ->
-            {500, #{code => 'UNKNOW_ERROR', message => err_msg(Reason)}}
-    end;
-do_manage_listeners2(<<"restart">>, Param) ->
-    case emqx_mgmt:manage_listener(restart_listener, Param) of
-        ok -> {200};
-        {error, not_found} -> do_manage_listeners2(<<"start">>, Param);
-        {error, Reason} ->
-            {500, #{code => 'UNKNOW_ERROR', message => err_msg(Reason)}}
-    end.
-
-manage_listeners_err(Errors) ->
-    list_to_binary(lists:foldl(fun({Node, Err}, Str) ->
-            err_msg_str(#{node => Node, error => Err}) ++ "; " ++ Str
-        end, "", Errors)).
-
-format(Listeners) when is_list(Listeners) ->
-    [format(Listener) || Listener <- Listeners];
-
-format({error, Reason}) ->
-    {error, Reason};
-
-format(#{node := _Node, id := _Id} = Conf) when is_map(Conf) ->
-    emqx_map_lib:jsonable_map(Conf#{
-            running => trans_running(Conf)
-        }, fun ?MODULE:jsonable_resp/2).
-
-trans_running(Conf) ->
-    case maps:get(running, Conf) of
-        {error, _} ->
-            false;
-        Running ->
-            Running
-    end.
-
-filter_errors({error, _}) ->
-    true;
-filter_errors(_) ->
-    false.
-
-jsonable_resp(bind, Port) when is_integer(Port) ->
-    {bind, Port};
-jsonable_resp(bind, {Addr, Port}) when is_tuple(Addr); is_integer(Port)->
-    {bind, inet:ntoa(Addr) ++ ":" ++ integer_to_list(Port)};
-jsonable_resp(user_lookup_fun, _) ->
-    drop;
-jsonable_resp(K, V) ->
-    {K, V}.
-
-atom(B) when is_binary(B) -> binary_to_atom(B, utf8);
-atom(S) when is_list(S) -> list_to_atom(S);
-atom(A) when is_atom(A) -> A.
-
-err_msg(Reason) ->
-    list_to_binary(err_msg_str(Reason)).
+err_msg(Atom) when is_atom(Atom) -> atom_to_binary(Atom);
+err_msg(Reason) -> list_to_binary(err_msg_str(Reason)).
 
 err_msg_str(Reason) ->
     io_lib:format("~p", [Reason]).
+
+list_listeners() ->
+    [list_listeners(Node) || Node <- mria_mnesia:running_nodes()].
+
+list_listeners(Node) ->
+    wrap_rpc(emqx_management_proto_v2:list_listeners(Node)).
+
+listener_status_by_id(NodeL) ->
+    Listeners = maps:to_list(listener_status_by_id(NodeL, #{})),
+    lists:map(
+        fun({Id, L}) ->
+            L1 = maps:remove(ids, L),
+            #{node_status := Nodes} = L1,
+            L1#{number => length(Nodes), id => Id}
+        end,
+        Listeners
+    ).
+
+listener_status_by_type([], Acc) ->
+    Acc;
+listener_status_by_type([NodeL | Rest], Acc) ->
+    #{<<"node">> := Node, <<"listeners">> := Listeners} = NodeL,
+    Acc1 = lists:foldl(
+        fun(L, Acc0) -> format_status(<<"type">>, Node, L, Acc0) end,
+        Acc,
+        Listeners
+    ),
+    listener_status_by_type(Rest, Acc1).
+
+listener_status_by_id([], Acc) ->
+    Acc;
+listener_status_by_id([NodeL | Rest], Acc) ->
+    #{<<"node">> := Node, <<"listeners">> := Listeners} = NodeL,
+    Acc1 = lists:foldl(
+        fun(L, Acc0) -> format_status(<<"id">>, Node, L, Acc0) end,
+        Acc,
+        Listeners
+    ),
+    listener_status_by_id(Rest, Acc1).
+
+listener_type_filter(Type0, Listeners) ->
+    lists:map(
+        fun(Conf = #{<<"listeners">> := Listeners0}) ->
+            Conf#{
+                <<"listeners">> =>
+                    [C || C = #{<<"type">> := Type} <- Listeners0, Type =:= Type0]
+            }
+        end,
+        Listeners
+    ).
+
+-spec do_list_listeners() -> map().
+do_list_listeners() ->
+    Listeners = [
+        Conf#{<<"id">> => Id, <<"type">> => Type}
+     || {Id, Type, Conf} <- emqx_listeners:list_raw()
+    ],
+    #{
+        <<"node">> => node(),
+        <<"listeners">> => Listeners
+    }.
+
+wrap_rpc({badrpc, Reason}) ->
+    {error, Reason};
+wrap_rpc(Res) ->
+    Res.
+
+format_status(Key, Node, Listener, Acc) ->
+    #{
+        <<"id">> := Id,
+        <<"type">> := Type,
+        <<"enabled">> := Enabled,
+        <<"running">> := Running,
+        <<"max_connections">> := MaxConnections,
+        <<"current_connections">> := CurrentConnections,
+        <<"acceptors">> := Acceptors,
+        <<"bind">> := Bind
+    } = Listener,
+    {ok, #{name := Name}} = emqx_listeners:parse_listener_id(Id),
+    GroupKey = maps:get(Key, Listener),
+    case maps:find(GroupKey, Acc) of
+        error ->
+            Acc#{
+                GroupKey => #{
+                    name => Name,
+                    type => Type,
+                    enable => Enabled,
+                    ids => [Id],
+                    acceptors => Acceptors,
+                    bind => iolist_to_binary(emqx_listeners:format_bind(Bind)),
+                    status => #{
+                        running => Running,
+                        max_connections => MaxConnections,
+                        current_connections => CurrentConnections
+                    },
+                    node_status => [
+                        #{
+                            node => Node,
+                            status => #{
+                                running => Running,
+                                max_connections => MaxConnections,
+                                current_connections => CurrentConnections
+                            }
+                        }
+                    ]
+                }
+            };
+        {ok, GroupValue} ->
+            #{
+                ids := Ids,
+                status := #{
+                    running := Running0,
+                    max_connections := MaxConnections0,
+                    current_connections := CurrentConnections0
+                },
+                node_status := NodeStatus0
+            } = GroupValue,
+            NodeStatus = [
+                #{
+                    node => Node,
+                    status => #{
+                        running => Running,
+                        max_connections => MaxConnections,
+                        current_connections => CurrentConnections
+                    }
+                }
+                | NodeStatus0
+            ],
+            NRunning =
+                case Running == Running0 of
+                    true -> Running0;
+                    _ -> inconsistent
+                end,
+            Acc#{
+                GroupKey =>
+                    GroupValue#{
+                        ids => lists:usort([Id | Ids]),
+                        status => #{
+                            running => NRunning,
+                            max_connections => max_conn(MaxConnections0, MaxConnections),
+                            current_connections => CurrentConnections0 + CurrentConnections
+                        },
+                        node_status => NodeStatus
+                    }
+            }
+    end.
+
+max_conn(_Int1, <<"infinity">>) -> <<"infinity">>;
+max_conn(<<"infinity">>, _Int) -> <<"infinity">>;
+max_conn(Int1, Int2) -> Int1 + Int2.
+
+update(Path, Conf) ->
+    wrap(emqx_conf:update(Path, {update, Conf}, ?OPTS(cluster))).
+
+action(Path, Action, Conf) ->
+    wrap(emqx_conf:update(Path, {action, Action, Conf}, ?OPTS(cluster))).
+
+create(Path, Conf) ->
+    wrap(emqx_conf:update(Path, {create, Conf}, ?OPTS(cluster))).
+
+ensure_remove(Path) ->
+    wrap(emqx_conf:remove(Path, ?OPTS(cluster))).
+
+wrap({error, {post_config_update, emqx_listeners, Reason}}) -> {error, Reason};
+wrap({error, {pre_config_update, emqx_listeners, Reason}}) -> {error, Reason};
+wrap({error, Reason}) -> {error, Reason};
+wrap(Ok) -> Ok.
+
+listener_type_status_example() ->
+    [
+        #{
+            enable => false,
+            ids => ["tcp:demo"],
+            node_status =>
+                [
+                    #{
+                        node => 'emqx@127.0.0.1',
+                        status => #{
+                            running => true,
+                            current_connections => 11,
+                            max_connections => 1024000
+                        }
+                    },
+                    #{
+                        node => 'emqx@127.0.0.1',
+                        status => #{
+                            running => true,
+                            current_connections => 10,
+                            max_connections => 1024000
+                        }
+                    }
+                ],
+            status => #{
+                running => true,
+                current_connections => 21,
+                max_connections => 2048000
+            },
+            type => tcp
+        },
+        #{
+            enable => false,
+            ids => ["ssl:default"],
+            node_status =>
+                [
+                    #{
+                        node => 'emqx@127.0.0.1',
+                        status => #{
+                            running => true,
+                            current_connections => 31,
+                            max_connections => infinity
+                        }
+                    },
+                    #{
+                        node => 'emqx@127.0.0.1',
+                        status => #{
+                            running => true,
+                            current_connections => 40,
+                            max_connections => infinity
+                        }
+                    }
+                ],
+
+            status => #{
+                running => true,
+                current_connections => 71,
+                max_connections => infinity
+            },
+            type => ssl
+        }
+    ].
+
+listener_id_status_example() ->
+    [
+        #{
+            acceptors => 16,
+            bind => <<"0.0.0.0:1884">>,
+            enable => true,
+            id => <<"tcp:demo">>,
+            type => <<"tcp">>,
+            name => <<"demo">>,
+            node_status =>
+                [
+                    #{
+                        node => 'emqx@127.0.0.1',
+                        status => #{
+                            running => true,
+                            current_connections => 100,
+                            max_connections => 1024000
+                        }
+                    },
+                    #{
+                        node => 'emqx@127.0.0.1',
+                        status => #{
+                            running => true,
+                            current_connections => 101,
+                            max_connections => 1024000
+                        }
+                    }
+                ],
+            number => 2,
+            status => #{
+                running => true,
+                current_connections => 201,
+                max_connections => 2048000
+            }
+        },
+        #{
+            acceptors => 32,
+            bind => <<"0.0.0.0:1883">>,
+            enable => true,
+            id => <<"tcp:default">>,
+            type => <<"tcp">>,
+            name => <<"default">>,
+            node_status =>
+                [
+                    #{
+                        node => 'emqx@127.0.0.1',
+                        status => #{
+                            running => true,
+                            current_connections => 200,
+                            max_connections => infinity
+                        }
+                    },
+                    #{
+                        node => 'emqx@127.0.0.1',
+                        status => #{
+                            running => true,
+                            current_connections => 301,
+                            max_connections => infinity
+                        }
+                    }
+                ],
+            number => 2,
+            status => #{
+                running => true,
+                current_connections => 501,
+                max_connections => infinity
+            }
+        }
+    ].
+
+tcp_schema_example() ->
+    #{
+        acceptors => 16,
+        access_rules => ["allow all"],
+        bind => <<"0.0.0.0:1884">>,
+        current_connections => 10240,
+        id => <<"tcp:demo">>,
+        max_connections => 204800,
+        mountpoint => <<"/">>,
+        proxy_protocol => false,
+        proxy_protocol_timeout => <<"3s">>,
+        running => true,
+        tcp_options => #{
+            active_n => 100,
+            backlog => 1024,
+            buffer => <<"4KB">>,
+            high_watermark => <<"1MB">>,
+            nodelay => false,
+            reuseaddr => true,
+            send_timeout => <<"15s">>,
+            send_timeout_close => true
+        },
+        type => tcp,
+        zone => default
+    }.
+
+create_listener(Body) ->
+    case parse_listener_conf(Body) of
+        {Id, Type, Name, Conf} ->
+            Path = [listeners, Type, Name],
+            case create(Path, Conf) of
+                {ok, #{raw_config := _RawConf}} ->
+                    crud_listeners_by_id(get, #{bindings => #{id => Id}});
+                {error, already_exist} ->
+                    {400, #{code => 'BAD_LISTENER_ID', message => <<"Already Exist">>}};
+                {error, Reason} ->
+                    {400, #{code => 'BAD_REQUEST', message => err_msg(Reason)}}
+            end;
+        {error, Reason} ->
+            {400, #{code => 'BAD_REQUEST', message => err_msg(Reason)}}
+    end.
+
+listener_struct(Type) ->
+    Listeners = listeners_info(#{bind => true}) ++ listeners_info(#{bind => false}),
+    [Schema] = [S || #{ref := ?R_REF(_, T), schema := S} <- Listeners, T =:= Type],
+    Schema.
+
+listener_struct_with_name(Type) ->
+    BaseSchema = listener_struct(Type),
+    lists:keyreplace(
+        id,
+        1,
+        BaseSchema,
+        {name,
+            ?HOCON(binary(), #{
+                desc => "Listener name",
+                required => true
+            })}
+    ).

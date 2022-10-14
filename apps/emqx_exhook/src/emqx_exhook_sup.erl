@@ -16,23 +16,28 @@
 
 -module(emqx_exhook_sup).
 
+-include("emqx_exhook.hrl").
+
 -behaviour(supervisor).
 
--export([ start_link/0
-        , init/1
-        ]).
+-export([
+    start_link/0,
+    init/1
+]).
 
--export([ start_grpc_client_channel/3
-        , stop_grpc_client_channel/1
-        ]).
+-export([
+    start_grpc_client_channel/3,
+    stop_grpc_client_channel/1
+]).
 
--define(CHILD(Mod, Type, Args),
-            #{ id => Mod
-             , start => {Mod, start_link, Args}
-             , type => Type
-             , shutdown => 15000
-             }
-       ).
+-define(DEFAULT_TIMEOUT, 5000).
+
+-define(CHILD(Mod, Type, Args, Timeout), #{
+    id => Mod,
+    start => {Mod, start_link, Args},
+    type => Type,
+    shutdown => Timeout
+}).
 
 %%--------------------------------------------------------------------
 %%  Supervisor APIs & Callbacks
@@ -44,7 +49,7 @@ start_link() ->
 init([]) ->
     _ = emqx_exhook_metrics:init(),
     _ = emqx_exhook_mgr:init_ref_counter_table(),
-    Mngr = ?CHILD(emqx_exhook_mgr, worker, []),
+    Mngr = ?CHILD(emqx_exhook_mgr, worker, [], force_shutdown_timeout()),
     {ok, {{one_for_one, 10, 100}, [Mngr]}}.
 
 %%--------------------------------------------------------------------
@@ -52,9 +57,10 @@ init([]) ->
 %%--------------------------------------------------------------------
 
 -spec start_grpc_client_channel(
-        binary(),
-        uri_string:uri_string(),
-        grpc_client_sup:options()) -> {ok, pid()} | {error, term()}.
+    binary(),
+    uri_string:uri_string(),
+    grpc_client_sup:options()
+) -> {ok, pid()} | {error, term()}.
 start_grpc_client_channel(Name, SvrAddr, Options) ->
     grpc_client_sup:create_channel_pool(Name, SvrAddr, Options).
 
@@ -68,3 +74,9 @@ stop_grpc_client_channel(Name) ->
         _:_:_ ->
             ok
     end.
+
+%% Calculate the maximum timeout, which will help to shutdown the
+%% emqx_exhook_mgr process correctly.
+force_shutdown_timeout() ->
+    Factor = max(3, length(emqx:get_config([exhook, servers])) + 1),
+    Factor * ?SERVER_FORCE_SHUTDOWN_TIMEOUT.

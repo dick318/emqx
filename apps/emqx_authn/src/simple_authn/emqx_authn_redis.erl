@@ -18,22 +18,25 @@
 
 -include("emqx_authn.hrl").
 -include_lib("emqx/include/logger.hrl").
--include_lib("typerefl/include/types.hrl").
+-include_lib("hocon/include/hoconsc.hrl").
 
 -behaviour(hocon_schema).
 -behaviour(emqx_authentication).
 
--export([ namespace/0
-        , roots/0
-        , fields/1
-        ]).
+-export([
+    namespace/0,
+    roots/0,
+    fields/1,
+    desc/1
+]).
 
--export([ refs/0
-        , create/2
-        , update/2
-        , authenticate/2
-        , destroy/1
-        ]).
+-export([
+    refs/0,
+    create/2,
+    update/2,
+    authenticate/2,
+    destroy/1
+]).
 
 %%------------------------------------------------------------------------------
 %% Hocon Schema
@@ -42,27 +45,41 @@
 namespace() -> "authn-redis".
 
 roots() ->
-    [ {?CONF_NS, hoconsc:mk(hoconsc:union(refs()),
-                            #{})}
+    [
+        {?CONF_NS,
+            hoconsc:mk(
+                hoconsc:union(refs()),
+                #{}
+            )}
     ].
 
 fields(standalone) ->
     common_fields() ++ emqx_connector_redis:fields(single);
-
 fields(cluster) ->
     common_fields() ++ emqx_connector_redis:fields(cluster);
-
 fields(sentinel) ->
     common_fields() ++ emqx_connector_redis:fields(sentinel).
 
+desc(standalone) ->
+    ?DESC(standalone);
+desc(cluster) ->
+    ?DESC(cluster);
+desc(sentinel) ->
+    ?DESC(sentinel);
+desc(_) ->
+    "".
+
 common_fields() ->
-    [ {mechanism, emqx_authn_schema:mechanism('password-based')}
-    , {backend, emqx_authn_schema:backend(redis)}
-    , {cmd, fun cmd/1}
-    , {password_hash_algorithm, fun emqx_authn_password_hashing:type_ro/1}
+    [
+        {mechanism, emqx_authn_schema:mechanism(password_based)},
+        {backend, emqx_authn_schema:backend(redis)},
+        {cmd, fun cmd/1},
+        {password_hash_algorithm, fun emqx_authn_password_hashing:type_ro/1}
     ] ++ emqx_authn_schema:common_fields().
 
 cmd(type) -> string();
+cmd(desc) -> ?DESC(?FUNCTION_NAME);
+cmd(required) -> true;
 cmd(_) -> undefined.
 
 %%------------------------------------------------------------------------------
@@ -70,35 +87,106 @@ cmd(_) -> undefined.
 %%------------------------------------------------------------------------------
 
 refs() ->
-    [ hoconsc:ref(?MODULE, standalone)
-    , hoconsc:ref(?MODULE, cluster)
-    , hoconsc:ref(?MODULE, sentinel)
+    [
+        hoconsc:ref(?MODULE, standalone),
+        hoconsc:ref(?MODULE, cluster),
+        hoconsc:ref(?MODULE, sentinel)
     ].
 
 create(_AuthenticatorID, Config) ->
     create(Config).
 
-create(#{cmd := Cmd,
-         password_hash_algorithm := Algorithm} = Config) ->
-    ok = emqx_authn_password_hashing:init(Algorithm),
+create(Config0) ->
+    ResourceId = emqx_authn_utils:make_resource_id(?MODULE),
+    case parse_config(Config0) of
+        {error, _} = Res ->
+            Res;
+        {Config, State} ->
+            {ok, _Data} = emqx_authn_utils:create_resource(
+                ResourceId,
+                emqx_connector_redis,
+                Config
+            ),
+            {ok, State#{resource_id => ResourceId}}
+    end.
+
+update(Config0, #{resource_id := ResourceId} = _State) ->
+    {Config, NState} = parse_config(Config0),
+    case emqx_authn_utils:update_resource(emqx_connector_redis, Config, ResourceId) of
+        {error, Reason} ->
+            error({load_config_error, Reason});
+        {ok, _} ->
+            {ok, NState#{resource_id => ResourceId}}
+    end.
+
+destroy(#{resource_id := ResourceId}) ->
+    _ = emqx_resource:remove_local(ResourceId),
+    ok.
+
+authenticate(#{auth_method := _}, _) ->
+    ignore;
+authenticate(
+    #{password := Password} = Credential,
+    #{
+        cmd := {CommandName, KeyTemplate, Fields},
+        resource_id := ResourceId,
+        password_hash_algorithm := Algorithm
+    }
+) ->
+    NKey = emqx_authn_utils:render_str(KeyTemplate, Credential),
+    Command = [CommandName, NKey | Fields],
+    case emqx_resource:query(ResourceId, {cmd, Command}) of
+        {ok, []} ->
+            ignore;
+        {ok, Values} ->
+            case merge(Fields, Values) of
+                Selected when Selected =/= #{} ->
+                    case
+                        emqx_authn_utils:check_password_from_selected_map(
+                            Algorithm, Selected, Password
+                        )
+                    of
+                        ok ->
+                            {ok, emqx_authn_utils:is_superuser(Selected)};
+                        {error, _Reason} = Error ->
+                            Error
+                    end;
+                _ ->
+                    ?TRACE_AUTHN_PROVIDER(info, "redis_query_not_matched", #{
+                        resource => ResourceId,
+                        cmd => Command,
+                        keys => NKey,
+                        fields => Fields
+                    }),
+                    ignore
+            end;
+        {error, Reason} ->
+            ?TRACE_AUTHN_PROVIDER(error, "redis_query_failed", #{
+                resource => ResourceId,
+                cmd => Command,
+                keys => NKey,
+                fields => Fields,
+                reason => Reason
+            }),
+            ignore
+    end.
+
+%%------------------------------------------------------------------------------
+%% Internal functions
+%%------------------------------------------------------------------------------
+
+parse_config(
+    #{
+        cmd := Cmd,
+        password_hash_algorithm := Algorithm
+    } = Config
+) ->
     try
         NCmd = parse_cmd(Cmd),
+        ok = emqx_authn_password_hashing:init(Algorithm),
         ok = emqx_authn_utils:ensure_apps_started(Algorithm),
-        State = maps:with(
-                  [password_hash_algorithm, salt_position],
-                  Config),
-        ResourceId = emqx_authn_utils:make_resource_id(?MODULE),
-        NState = State#{
-                   cmd => NCmd,
-                   resource_id => ResourceId},
-        case emqx_resource:create_local(ResourceId, emqx_connector_redis, Config) of
-            {ok, already_created} ->
-                {ok, NState};
-            {ok, _} ->
-                {ok, NState};
-            {error, Reason} ->
-                {error, Reason}
-        end
+        State = maps:with([password_hash_algorithm, salt_position], Config),
+        {Config, State#{cmd => NCmd}}
     catch
         error:{unsupported_cmd, _Cmd} ->
             {error, {unsupported_cmd, Cmd}};
@@ -107,60 +195,6 @@ create(#{cmd := Cmd,
         error:{unsupported_fields, Fields} ->
             {error, {unsupported_fields, Fields}}
     end.
-
-update(Config, State) ->
-    case create(Config) of
-        {ok, NewState} ->
-            ok = destroy(State),
-            {ok, NewState};
-        {error, Reason} ->
-            {error, Reason}
-    end.
-
-authenticate(#{auth_method := _}, _) ->
-    ignore;
-authenticate(#{password := Password} = Credential,
-             #{cmd := {Command, KeyTemplate, Fields},
-               resource_id := ResourceId,
-               password_hash_algorithm := Algorithm}) ->
-    NKey = emqx_authn_utils:render_str(KeyTemplate, Credential),
-    case emqx_resource:query(ResourceId, {cmd, [Command, NKey | Fields]}) of
-        {ok, []} -> ignore;
-        {ok, Values} ->
-            case merge(Fields, Values) of
-                #{<<"password_hash">> := _} = Selected ->
-                    case emqx_authn_utils:check_password_from_selected_map(
-                          Algorithm, Selected, Password) of
-                        ok ->
-                            {ok, emqx_authn_utils:is_superuser(Selected)};
-                        {error, Reason} ->
-                            {error, Reason}
-                    end;
-                _ ->
-                    ?SLOG(error, #{msg => "cannot_find_password_hash_field",
-                                   cmd => Command,
-                                   keys => NKey,
-                                   fields => Fields,
-                                   resource => ResourceId}),
-                    ignore
-            end;
-        {error, Reason} ->
-            ?SLOG(error, #{msg => "redis_query_failed",
-                           resource => ResourceId,
-                           cmd => Command,
-                           keys => NKey,
-                           fields => Fields,
-                           reason => Reason}),
-            ignore
-    end.
-
-destroy(#{resource_id := ResourceId}) ->
-    _ = emqx_resource:remove_local(ResourceId),
-    ok.
-
-%%------------------------------------------------------------------------------
-%% Internal functions
-%%------------------------------------------------------------------------------
 
 %% Only support HGET and HMGET
 parse_cmd(Cmd) ->
@@ -175,8 +209,8 @@ parse_cmd(Cmd) ->
     end.
 
 check_fields(Fields) ->
-    HasPassHash = lists:member("password_hash", Fields),
-    KnownFields = ["password_hash", "salt", "is_superuser"],
+    HasPassHash = lists:member("password_hash", Fields) orelse lists:member("password", Fields),
+    KnownFields = ["password_hash", "password", "salt", "is_superuser"],
     UnknownFields = [F || F <- Fields, not lists:member(F, KnownFields)],
 
     case {HasPassHash, UnknownFields} of
@@ -189,5 +223,8 @@ merge(Fields, Value) when not is_list(Value) ->
     merge(Fields, [Value]);
 merge(Fields, Values) ->
     maps:from_list(
-        [{list_to_binary(K), V}
-            || {K, V} <- lists:zip(Fields, Values), V =/= undefined]).
+        [
+            {list_to_binary(K), V}
+         || {K, V} <- lists:zip(Fields, Values), V =/= undefined
+        ]
+    ).

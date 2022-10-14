@@ -28,24 +28,17 @@ init_suite(Apps) ->
     application:load(emqx_management),
     emqx_common_test_helpers:start_apps(Apps ++ [emqx_dashboard], fun set_special_configs/1).
 
-
 end_suite() ->
     end_suite([]).
 
 end_suite(Apps) ->
     application:unload(emqx_management),
-    emqx_common_test_helpers:stop_apps(Apps ++ [emqx_dashboard]).
+    emqx_common_test_helpers:stop_apps(Apps ++ [emqx_dashboard]),
+    emqx_config:delete_override_conf_files(),
+    ok.
 
 set_special_configs(emqx_dashboard) ->
-    Config = #{
-               default_username => <<"admin">>,
-               default_password => <<"public">>,
-               listeners => [#{
-                               protocol => http,
-                               port => 18083
-                              }]
-              },
-    emqx_config:put([dashboard], Config),
+    emqx_dashboard_api_test_helpers:set_default_config(),
     ok;
 set_special_configs(_App) ->
     ok.
@@ -53,44 +46,53 @@ set_special_configs(_App) ->
 request_api(Method, Url) ->
     request_api(Method, Url, [], auth_header_(), []).
 
-request_api(Method, Url, Auth) ->
-    request_api(Method, Url, [], Auth, []).
+request_api(Method, Url, AuthOrHeaders) ->
+    request_api(Method, Url, [], AuthOrHeaders, []).
 
-request_api(Method, Url, QueryParams, Auth) ->
-    request_api(Method, Url, QueryParams, Auth, []).
+request_api(Method, Url, QueryParams, AuthOrHeaders) ->
+    request_api(Method, Url, QueryParams, AuthOrHeaders, []).
 
-request_api(Method, Url, QueryParams, Auth, [])
-  when (Method =:= options) orelse
-         (Method =:= get) orelse
-         (Method =:= put) orelse
-         (Method =:= head) orelse
-         (Method =:= delete) orelse
-         (Method =:= trace) ->
-    NewUrl = case QueryParams of
-                 "" -> Url;
-                 _ -> Url ++ "?" ++ QueryParams
-             end,
-    do_request_api(Method, {NewUrl, [Auth]});
-request_api(Method, Url, QueryParams, Auth, Body)
-    when (Method =:= post) orelse
-         (Method =:= patch) orelse
-         (Method =:= put) orelse
-         (Method =:= delete) ->
-    NewUrl = case QueryParams of
-                 "" -> Url;
-                 _ -> Url ++ "?" ++ QueryParams
-             end,
-    do_request_api(Method, {NewUrl, [Auth], "application/json", emqx_json:encode(Body)}).
+request_api(Method, Url, QueryParams, AuthOrHeaders, []) when
+    (Method =:= options) orelse
+        (Method =:= get) orelse
+        (Method =:= put) orelse
+        (Method =:= head) orelse
+        (Method =:= delete) orelse
+        (Method =:= trace)
+->
+    NewUrl =
+        case QueryParams of
+            "" -> Url;
+            _ -> Url ++ "?" ++ QueryParams
+        end,
+    do_request_api(Method, {NewUrl, build_http_header(AuthOrHeaders)});
+request_api(Method, Url, QueryParams, AuthOrHeaders, Body) when
+    (Method =:= post) orelse
+        (Method =:= patch) orelse
+        (Method =:= put) orelse
+        (Method =:= delete)
+->
+    NewUrl =
+        case QueryParams of
+            "" -> Url;
+            _ -> Url ++ "?" ++ QueryParams
+        end,
+    do_request_api(
+        Method,
+        {NewUrl, build_http_header(AuthOrHeaders), "application/json", emqx_json:encode(Body)}
+    ).
 
-do_request_api(Method, Request)->
+do_request_api(Method, Request) ->
     ct:pal("Method: ~p, Request: ~p", [Method, Request]),
     case httpc:request(Method, Request, [], []) of
         {error, socket_closed_remotely} ->
             {error, socket_closed_remotely};
-        {ok, {{"HTTP/1.1", Code, _}, _, Return} }
-            when Code >= 200 andalso Code =< 299 ->
+        {ok, {{"HTTP/1.1", Code, _}, _, Return}} when
+            Code >= 200 andalso Code =< 299
+        ->
             {ok, Return};
-        {ok, {Reason, _, _}} ->
+        {ok, {Reason, _, _} = Error} ->
+            ct:pal("error: ~p~n", [Error]),
             {error, Reason}
     end.
 
@@ -100,5 +102,116 @@ auth_header_() ->
     {ok, Token} = emqx_dashboard_admin:sign_token(Username, Password),
     {"Authorization", "Bearer " ++ binary_to_list(Token)}.
 
-api_path(Parts)->
+build_http_header(X) when is_list(X) ->
+    X;
+build_http_header(X) ->
+    [X].
+
+api_path(Parts) ->
     ?SERVER ++ filename:join([?BASE_PATH | Parts]).
+
+api_path_without_base_path(Parts) ->
+    ?SERVER ++ filename:join([Parts]).
+
+%% Usage:
+%% upload_request(<<"site.com/api/upload">>, <<"path/to/file.png">>,
+%% <<"upload">>, <<"image/png">>, [], <<"some-token">>)
+%%
+%% Usage with RequestData:
+%% Payload = [{upload_type, <<"user_picture">>}],
+%% PayloadContent = jsx:encode(Payload),
+%% RequestData = [
+%%     {<<"payload">>, PayloadContent}
+%% ]
+%% upload_request(<<"site.com/api/upload">>, <<"path/to/file.png">>,
+%% <<"upload">>, <<"image/png">>, RequestData, <<"some-token">>)
+-spec upload_request(URL, FilePath, Name, MimeType, RequestData, AuthorizationToken) ->
+    {ok, binary()} | {error, list()}
+when
+    URL :: binary(),
+    FilePath :: binary(),
+    Name :: binary(),
+    MimeType :: binary(),
+    RequestData :: list(),
+    AuthorizationToken :: binary().
+upload_request(URL, FilePath, Name, MimeType, RequestData, AuthorizationToken) ->
+    Method = post,
+    Filename = filename:basename(FilePath),
+    {ok, Data} = file:read_file(FilePath),
+    Boundary = emqx_guid:to_base62(emqx_guid:gen()),
+    RequestBody = format_multipart_formdata(
+        Data,
+        RequestData,
+        Name,
+        [Filename],
+        MimeType,
+        Boundary
+    ),
+    ContentType = "multipart/form-data; boundary=" ++ binary_to_list(Boundary),
+    ContentLength = integer_to_list(length(binary_to_list(RequestBody))),
+    Headers = [
+        {"Content-Length", ContentLength},
+        case AuthorizationToken =/= undefined of
+            true -> {"Authorization", "Bearer " ++ binary_to_list(AuthorizationToken)};
+            false -> {}
+        end
+    ],
+    HTTPOptions = [],
+    Options = [{body_format, binary}],
+    inets:start(),
+    httpc:request(Method, {URL, Headers, ContentType, RequestBody}, HTTPOptions, Options).
+
+-spec format_multipart_formdata(Data, Params, Name, FileNames, MimeType, Boundary) ->
+    binary()
+when
+    Data :: binary(),
+    Params :: list(),
+    Name :: binary(),
+    FileNames :: list(),
+    MimeType :: binary(),
+    Boundary :: binary().
+format_multipart_formdata(Data, Params, Name, FileNames, MimeType, Boundary) ->
+    StartBoundary = erlang:iolist_to_binary([<<"--">>, Boundary]),
+    LineSeparator = <<"\r\n">>,
+    WithParams = lists:foldl(
+        fun({Key, Value}, Acc) ->
+            erlang:iolist_to_binary([
+                Acc,
+                StartBoundary,
+                LineSeparator,
+                <<"Content-Disposition: form-data; name=\"">>,
+                Key,
+                <<"\"">>,
+                LineSeparator,
+                LineSeparator,
+                Value,
+                LineSeparator
+            ])
+        end,
+        <<"">>,
+        Params
+    ),
+    WithPaths = lists:foldl(
+        fun(FileName, Acc) ->
+            erlang:iolist_to_binary([
+                Acc,
+                StartBoundary,
+                LineSeparator,
+                <<"Content-Disposition: form-data; name=\"">>,
+                Name,
+                <<"\"; filename=\"">>,
+                FileName,
+                <<"\"">>,
+                LineSeparator,
+                <<"Content-Type: ">>,
+                MimeType,
+                LineSeparator,
+                LineSeparator,
+                Data,
+                LineSeparator
+            ])
+        end,
+        WithParams,
+        FileNames
+    ),
+    erlang:iolist_to_binary([WithPaths, StartBoundary, <<"--">>, LineSeparator]).

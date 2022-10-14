@@ -17,6 +17,19 @@
 -ifndef(EMQX_AUTHENTICATION_HRL).
 -define(EMQX_AUTHENTICATION_HRL, true).
 
+-include_lib("emqx/include/logger.hrl").
+
+-define(AUTHN_TRACE_TAG, "AUTHN").
+
+-define(TRACE_AUTHN_PROVIDER(Msg), ?TRACE_AUTHN_PROVIDER(Msg, #{})).
+-define(TRACE_AUTHN_PROVIDER(Msg, Meta), ?TRACE_AUTHN_PROVIDER(debug, Msg, Meta)).
+-define(TRACE_AUTHN_PROVIDER(Level, Msg, Meta),
+    ?TRACE_AUTHN(Level, Msg, (Meta)#{provider => ?MODULE})
+).
+
+-define(TRACE_AUTHN(Msg, Meta), ?TRACE_AUTHN(debug, Msg, Meta)).
+-define(TRACE_AUTHN(Level, Msg, Meta), ?TRACE(Level, ?AUTHN_TRACE_TAG, Msg, Meta)).
+
 %% config root name all auth providers have to agree on.
 -define(EMQX_AUTHENTICATION_CONFIG_ROOT_NAME, "authentication").
 -define(EMQX_AUTHENTICATION_CONFIG_ROOT_NAME_ATOM, authentication).
@@ -27,5 +40,11 @@
 %% see emqx_schema.erl for more details
 %% and emqx_conf_schema for an examples
 -define(EMQX_AUTHENTICATION_SCHEMA_MODULE_PT_KEY, emqx_authentication_schema_module).
+
+%% authentication move cmd
+-define(CMD_MOVE_FRONT, front).
+-define(CMD_MOVE_REAR, rear).
+-define(CMD_MOVE_BEFORE(Before), {before, Before}).
+-define(CMD_MOVE_AFTER(After), {'after', After}).
 
 -endif.

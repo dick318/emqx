@@ -16,490 +16,275 @@
 
 -module(emqx_authz_api_schema).
 
--export([definitions/0]).
+-include("emqx_authz.hrl").
+-include_lib("hocon/include/hoconsc.hrl").
+-include_lib("emqx_connector/include/emqx_connector.hrl").
 
-definitions() ->
-    Sources = #{
-        'oneOf' => [ minirest:ref(<<"http">>)
-                   , minirest:ref(<<"built-in-database">>)
-                   , minirest:ref(<<"mongo_single">>)
-                   , minirest:ref(<<"mongo_rs">>)
-                   , minirest:ref(<<"mongo_sharded">>)
-                   , minirest:ref(<<"mysql">>)
-                   , minirest:ref(<<"postgresql">>)
-                   , minirest:ref(<<"redis_single">>)
-                   , minirest:ref(<<"redis_sentinel">>)
-                   , minirest:ref(<<"redis_cluster">>)
-                   , minirest:ref(<<"file">>)
-                   ]
-    },
-    SSL = #{
-      type => object,
-      required => [enable],
-      properties => #{
-         enable => #{type => boolean, example => true},
-         cacertfile => #{type => string},
-         keyfile => #{type => string},
-         certfile => #{type => string},
-         verify => #{type => boolean, example => false}
-      }
-    },
-    HTTP = #{
-        type => object,
-        required => [ type
-                    , enable
-                    , method
-                    , headers
-                    , request_timeout
-                    , connect_timeout
-                    , max_retries
-                    , retry_interval
-                    , pool_type
-                    , pool_size
-                    , enable_pipelining
-                    , ssl
-                    ],
-        properties => #{
-            type => #{
-                type => string,
-                enum => [<<"http">>],
-                example => <<"http">>
-            },
-            enable => #{
-                type => boolean,
-                example => true
-            },
-            url => #{
-                type => string,
-                example => <<"https://emqx.com">>
-            },
-            method => #{
-                type => string,
-                enum => [<<"get">>, <<"post">>],
-                example => <<"get">>
-            },
-            headers => #{type => object},
-            body => #{type => object},
-            connect_timeout => #{type => string},
-            max_retries => #{type => integer},
-            retry_interval => #{type => string},
-            pool_type => #{
-                type => string,
-                enum => [<<"random">>, <<"hash">>],
-                example => <<"hash">>
-            },
-            pool_size => #{type => integer},
-            enable_pipelining => #{type => boolean},
-            ssl => minirest:ref(<<"ssl">>)
-        }
-    },
-    MongoSingle= #{
-        type => object,
-        required => [ type
-                    , enable
-                    , collection
-                    , selector
-                    , mongo_type
-                    , server
-                    , pool_size
-                    , username
-                    , password
-                    , auth_source
-                    , database
-                    , topology
-                    , ssl
-                    ],
-        properties => #{
-            type => #{
-                type => string,
-                enum => [<<"mongodb">>],
-                example => <<"mongodb">>
-            },
-            enable => #{
-                type => boolean,
-                example => true
-            },
-            srv_record => #{type => boolean, example => false, default => false},
-            collection => #{type => string},
-            selector => #{type => object},
-            mongo_type => #{type => string,
-                            enum => [<<"single">>],
-                            example => <<"single">>},
-            server => #{type => string, example => <<"127.0.0.1:27017">>},
-            pool_size => #{type => integer},
-            username => #{type => string},
-            password => #{type => string},
-            auth_source => #{type => string},
-            database => #{type => string},
-            topology => #{type => object,
-                          properties => #{
-                            pool_size => #{type => integer},
-                            max_overflow => #{type => integer},
-                            overflow_ttl => #{type => string},
-                            overflow_check_period => #{type => string},
-                            local_threshold_ms => #{type => integer},
-                            connect_timeout_ms => #{type => integer},
-                            socket_timeout_ms => #{type => integer},
-                            server_selection_timeout_ms => #{type => integer},
-                            wait_queue_timeout_ms => #{type => integer},
-                            heartbeat_frequency_ms => #{type => integer},
-                            min_heartbeat_frequency_ms => #{type => integer}
-                          }
-                         },
-            ssl => minirest:ref(<<"ssl">>)
-        }
-    },
-    MongoRs= #{
-        type => object,
-        required => [ type
-                    , enable
-                    , collection
-                    , selector
-                    , mongo_type
-                    , servers
-                    , replica_set_name
-                    , pool_size
-                    , username
-                    , password
-                    , auth_source
-                    , database
-                    , topology
-                    , ssl
-                    ],
-        properties => #{
-            type => #{
-                type => string,
-                enum => [<<"mongodb">>],
-                example => <<"mongodb">>
-            },
-            enable => #{
-                type => boolean,
-                example => true
-            },
-            srv_record => #{type => boolean, example => false, default => false},
-            collection => #{type => string},
-            selector => #{type => object},
-            mongo_type => #{type => string,
-                            enum => [<<"rs">>],
-                            example => <<"rs">>},
-            servers => #{type => string, example => <<"127.0.0.1:27017, 127.0.0.2:27017">>},
-            replica_set_name => #{type => string},
-            pool_size => #{type => integer},
-            username => #{type => string},
-            password => #{type => string},
-            auth_source => #{type => string},
-            database => #{type => string},
-            topology => #{type => object,
-                          properties => #{
-                            pool_size => #{type => integer},
-                            max_overflow => #{type => integer},
-                            overflow_ttl => #{type => string},
-                            overflow_check_period => #{type => string},
-                            local_threshold_ms => #{type => integer},
-                            connect_timeout_ms => #{type => integer},
-                            socket_timeout_ms => #{type => integer},
-                            server_selection_timeout_ms => #{type => integer},
-                            wait_queue_timeout_ms => #{type => integer},
-                            heartbeat_frequency_ms => #{type => integer},
-                            min_heartbeat_frequency_ms => #{type => integer}
-                          }
-                         },
-            ssl => minirest:ref(<<"ssl">>)
-        }
-    },
-    MongoSharded = #{
-        type => object,
-        required => [ type
-                    , enable
-                    , collection
-                    , selector
-                    , mongo_type
-                    , servers
-                    , pool_size
-                    , username
-                    , password
-                    , auth_source
-                    , database
-                    , topology
-                    , ssl
-                    ],
-        properties => #{
-            type => #{
-                type => string,
-                enum => [<<"mongodb">>],
-                example => <<"mongodb">>
-            },
-            enable => #{
-                type => boolean,
-                example => true
-            },
-            srv_record => #{type => boolean, example => false, default => false},
-            collection => #{type => string},
-            selector => #{type => object},
-            mongo_type => #{type => string,
-                            enum => [<<"sharded">>],
-                            example => <<"sharded">>},
-            servers => #{type => string,example => <<"127.0.0.1:27017, 127.0.0.2:27017">>},
-            pool_size => #{type => integer},
-            username => #{type => string},
-            password => #{type => string},
-            auth_source => #{type => string},
-            database => #{type => string},
-            topology => #{type => object,
-                          properties => #{
-                            pool_size => #{type => integer},
-                            max_overflow => #{type => integer},
-                            overflow_ttl => #{type => string},
-                            overflow_check_period => #{type => string},
-                            local_threshold_ms => #{type => integer},
-                            connect_timeout_ms => #{type => integer},
-                            socket_timeout_ms => #{type => integer},
-                            server_selection_timeout_ms => #{type => integer},
-                            wait_queue_timeout_ms => #{type => integer},
-                            heartbeat_frequency_ms => #{type => integer},
-                            min_heartbeat_frequency_ms => #{type => integer}
-                          }
-                         },
-            ssl => minirest:ref(<<"ssl">>)
-        }
-    },
-    Mysql = #{
-        type => object,
-        required => [ type
-                    , enable
-                    , query
-                    , server
-                    , database
-                    , pool_size
-                    , username
-                    , password
-                    , auto_reconnect
-                    , ssl
-                    ],
-        properties => #{
-            type => #{
-                type => string,
-                enum => [<<"mysql">>],
-                example => <<"mysql">>
-            },
-            enable => #{
-                type => boolean,
-                example => true
-            },
-            query => #{type => string},
-            server => #{type => string,
-                        example => <<"127.0.0.1:3306">>
-                       },
-            database => #{type => string},
-            pool_size => #{type => integer},
-            username => #{type => string},
-            password => #{type => string},
-            auto_reconnect => #{type => boolean,
-                                example => true
-                               },
-            ssl => minirest:ref(<<"ssl">>)
-        }
-    },
-    Pgsql = #{
-        type => object,
-        required => [ type
-                    , enable
-                    , query
-                    , server
-                    , database
-                    , pool_size
-                    , username
-                    , password
-                    , auto_reconnect
-                    , ssl
-                    ],
-        properties => #{
-            type => #{
-                type => string,
-                enum => [<<"postgresql">>],
-                example => <<"postgresql">>
-            },
-            enable => #{
-                type => boolean,
-                example => true
-            },
-            query => #{type => string},
-            server => #{type => string,
-                        example => <<"127.0.0.1:5432">>
-                       },
-            database => #{type => string},
-            pool_size => #{type => integer},
-            username => #{type => string},
-            password => #{type => string},
-            auto_reconnect => #{type => boolean,
-                                example => true
-                               },
-            ssl => minirest:ref(<<"ssl">>)
-        }
-    },
-    RedisSingle = #{
-        type => object,
-        required => [ type
-                    , enable
-                    , cmd
-                    , server
-                    , redis_type
-                    , pool_size
-                    , auto_reconnect
-                    , ssl
-                    ],
-        properties => #{
-            type => #{
-                type => string,
-                enum => [<<"redis">>],
-                example => <<"redis">>
-            },
-            enable => #{
-                type => boolean,
-                example => true
-            },
-            cmd => #{
-                type => string,
-                example => <<"HGETALL mqtt_authz">>
-            },
-            server => #{type => string, example => <<"127.0.0.1:3306">>},
-            redis_type => #{type => string,
-                            enum => [<<"single">>],
-                            example => <<"single">>},
-            pool_size => #{type => integer},
-            auto_reconnect => #{type => boolean, example => true},
-            password => #{type => string},
-            database => #{type => integer},
-            ssl => minirest:ref(<<"ssl">>)
-        }
-    },
-    RedisSentinel= #{
-        type => object,
-        required => [ type
-                    , enable
-                    , cmd
-                    , servers
-                    , redis_type
-                    , sentinel
-                    , pool_size
-                    , auto_reconnect
-                    , ssl
-                    ],
-        properties => #{
-            type => #{
-                type => string,
-                enum => [<<"redis">>],
-                example => <<"redis">>
-            },
-            enable => #{
-                type => boolean,
-                example => true
-            },
-            cmd => #{
-                type => string,
-                example => <<"HGETALL mqtt_authz">>
-            },
-            servers => #{type => string, example => <<"127.0.0.1:6379, 127.0.0.2:6379">>},
-            redis_type => #{type => string,
-                            enum => [<<"sentinel">>],
-                            example => <<"sentinel">>},
-            sentinel => #{type => string},
-            pool_size => #{type => integer},
-            auto_reconnect => #{type => boolean, example => true},
-            password => #{type => string},
-            database => #{type => integer},
-            ssl => minirest:ref(<<"ssl">>)
-        }
-    },
-    RedisCluster= #{
-        type => object,
-        required => [ type
-                    , enable
-                    , cmd
-                    , servers
-                    , redis_type
-                    , pool_size
-                    , auto_reconnect
-                    , ssl],
-        properties => #{
-            type => #{
-                type => string,
-                enum => [<<"redis">>],
-                example => <<"redis">>
-            },
-            enable => #{
-                type => boolean,
-                example => true
-            },
-            cmd => #{
-                type => string,
-                example => <<"HGETALL mqtt_authz">>
-            },
-            servers => #{type => string, example => <<"127.0.0.1:6379, 127.0.0.2:6379">>},
-            redis_type => #{type => string,
-                            enum => [<<"cluster">>],
-                            example => <<"cluster">>},
-            pool_size => #{type => integer},
-            auto_reconnect => #{type => boolean, example => true},
-            password => #{type => string},
-            database => #{type => integer},
-            ssl => minirest:ref(<<"ssl">>)
-        }
-    },
-    Mnesia = #{
-        type => object,
-        required => [type, enable],
-        properties => #{
-            type => #{
-                type => string,
-                enum => [<<"redis">>],
-                example => <<"redis">>
-            },
-            enable => #{
-                type => boolean,
-                example => true
-            }
-        }
-    },
-    File = #{
-        type => object,
-        required => [type, enable, rules],
-        properties => #{
-            type => #{
-                type => string,
-                enum => [<<"redis">>],
-                example => <<"redis">>
-            },
-            enable => #{
-                type => boolean,
-                example => true
-            },
-            rules => #{
-                type => array,
-                items => #{
-                  type => string,
-                  example =>
-                      <<"{allow,{username,\"^dashboard?\"},","subscribe,[\"$SYS/#\"]}.\n",
-                        "{allow,{ipaddr,\"127.0.0.1\"},all,[\"$SYS/#\",\"#\"]}.">>
+-import(hoconsc, [mk/2, enum/1]).
+-import(emqx_schema, [mk_duration/2]).
+
+-export([
+    fields/1,
+    authz_sources_types/1
+]).
+
+%%------------------------------------------------------------------------------
+%% Hocon Schema
+%%------------------------------------------------------------------------------
+
+fields(file) ->
+    authz_common_fields(file) ++
+        [
+            {rules, #{
+                type => binary(),
+                required => true,
+                example =>
+                    <<"{allow,{username,\"^dashboard?\"},", "subscribe,[\"$SYS/#\"]}.\n",
+                        "{allow,{ipaddr,\"127.0.0.1\"},all,[\"$SYS/#\",\"#\"]}.">>,
+                desc => ?DESC(rules)
+            }}
+        ];
+fields(http_get) ->
+    [
+        {method, #{type => get, default => get, required => true, desc => ?DESC(method)}},
+        {headers, fun headers_no_content_type/1}
+    ] ++ authz_http_common_fields();
+fields(http_post) ->
+    [
+        {method, #{type => post, default => post, required => true, desc => ?DESC(method)}},
+        {headers, fun headers/1}
+    ] ++ authz_http_common_fields();
+fields(built_in_database) ->
+    authz_common_fields(built_in_database);
+fields(mongo_single) ->
+    authz_mongo_common_fields() ++
+        emqx_connector_mongo:fields(single);
+fields(mongo_rs) ->
+    authz_mongo_common_fields() ++
+        emqx_connector_mongo:fields(rs);
+fields(mongo_sharded) ->
+    authz_mongo_common_fields() ++
+        emqx_connector_mongo:fields(sharded);
+fields(mysql) ->
+    authz_common_fields(mysql) ++
+        [{query, query()}] ++
+        proplists:delete(prepare_statement, emqx_connector_mysql:fields(config));
+fields(postgresql) ->
+    authz_common_fields(postgresql) ++
+        [{query, query()}] ++
+        proplists:delete(prepare_statement, emqx_connector_pgsql:fields(config));
+fields(redis_single) ->
+    authz_redis_common_fields() ++
+        emqx_connector_redis:fields(single);
+fields(redis_sentinel) ->
+    authz_redis_common_fields() ++
+        emqx_connector_redis:fields(sentinel);
+fields(redis_cluster) ->
+    authz_redis_common_fields() ++
+        emqx_connector_redis:fields(cluster);
+fields(position) ->
+    [
+        {position,
+            mk(
+                string(),
+                #{
+                    desc => ?DESC(position),
+                    required => true,
+                    in => body
                 }
-            },
-            path => #{
-                type => string,
-                example => <<"/path/to/authorizaiton_rules.conf">>
-            }
-        }
-    },
-    [ #{<<"sources">> => Sources}
-    , #{<<"ssl">> => SSL}
-    , #{<<"http">> => HTTP}
-    , #{<<"built-in-database">> => Mnesia}
-    , #{<<"mongo_single">> => MongoSingle}
-    , #{<<"mongo_rs">> => MongoRs}
-    , #{<<"mongo_sharded">> => MongoSharded}
-    , #{<<"mysql">> => Mysql}
-    , #{<<"postgresql">> => Pgsql}
-    , #{<<"redis_single">> => RedisSingle}
-    , #{<<"redis_sentinel">> => RedisSentinel}
-    , #{<<"redis_cluster">> => RedisCluster}
-    , #{<<"file">> => File}
+            )}
     ].
+
+%%------------------------------------------------------------------------------
+%% http type funcs
+
+authz_http_common_fields() ->
+    authz_common_fields(http) ++
+        [
+            {url, fun url/1},
+            {body,
+                hoconsc:mk(map([{fuzzy, term(), binary()}]), #{
+                    required => false, desc => ?DESC(body)
+                })},
+            {request_timeout,
+                mk_duration("Request timeout", #{
+                    required => false, default => "30s", desc => ?DESC(request_timeout)
+                })}
+        ] ++
+        maps:to_list(
+            maps:without(
+                [
+                    base_url,
+                    pool_type
+                ],
+                maps:from_list(emqx_connector_http:fields(config))
+            )
+        ).
+
+url(type) -> binary();
+url(validator) -> [?NOT_EMPTY("the value of the field 'url' cannot be empty")];
+url(required) -> true;
+url(desc) -> ?DESC(?FUNCTION_NAME);
+url(_) -> undefined.
+
+headers(type) ->
+    map();
+headers(desc) ->
+    ?DESC(?FUNCTION_NAME);
+headers(converter) ->
+    fun(Headers) ->
+        maps:merge(default_headers(), transform_header_name(Headers))
+    end;
+headers(default) ->
+    default_headers();
+headers(_) ->
+    undefined.
+
+headers_no_content_type(type) ->
+    map();
+headers_no_content_type(desc) ->
+    ?DESC(?FUNCTION_NAME);
+headers_no_content_type(converter) ->
+    fun(Headers) ->
+        maps:without(
+            [<<"content-type">>],
+            maps:merge(default_headers_no_content_type(), transform_header_name(Headers))
+        )
+    end;
+headers_no_content_type(default) ->
+    default_headers_no_content_type();
+headers_no_content_type(_) ->
+    undefined.
+
+%% headers
+default_headers() ->
+    maps:put(
+        <<"content-type">>,
+        <<"application/json">>,
+        default_headers_no_content_type()
+    ).
+
+default_headers_no_content_type() ->
+    #{
+        <<"accept">> => <<"application/json">>,
+        <<"cache-control">> => <<"no-cache">>,
+        <<"connection">> => <<"keep-alive">>,
+        <<"keep-alive">> => <<"timeout=30, max=1000">>
+    }.
+
+transform_header_name(Headers) ->
+    maps:fold(
+        fun(K0, V, Acc) ->
+            K = list_to_binary(string:to_lower(to_list(K0))),
+            maps:put(K, V, Acc)
+        end,
+        #{},
+        Headers
+    ).
+
+%%------------------------------------------------------------------------------
+%% MonogDB type funcs
+
+authz_mongo_common_fields() ->
+    authz_common_fields(mongodb) ++
+        [
+            {collection, fun collection/1},
+            {filter, fun filter/1}
+        ].
+
+collection(type) -> binary();
+collection(desc) -> ?DESC(?FUNCTION_NAME);
+collection(required) -> true;
+collection(_) -> undefined.
+
+filter(type) ->
+    map();
+filter(desc) ->
+    ?DESC(?FUNCTION_NAME);
+filter(required) ->
+    false;
+filter(default) ->
+    #{};
+filter(_) ->
+    undefined.
+
+%%------------------------------------------------------------------------------
+%% Redis type funcs
+
+authz_redis_common_fields() ->
+    authz_common_fields(redis) ++
+        [
+            {cmd,
+                mk(binary(), #{
+                    required => true,
+                    desc => ?DESC(cmd),
+                    example => <<"HGETALL mqtt_authz">>
+                })}
+        ].
+
+%%------------------------------------------------------------------------------
+%% Authz api type funcs
+
+authz_common_fields(Type) when is_atom(Type) ->
+    [
+        {enable, fun enable/1},
+        {type, #{
+            type => Type,
+            default => Type,
+            required => true,
+            desc => ?DESC(type),
+            in => body
+        }}
+    ].
+
+enable(type) -> boolean();
+enable(default) -> true;
+enable(desc) -> ?DESC(?FUNCTION_NAME);
+enable(_) -> undefined.
+
+%%------------------------------------------------------------------------------
+%% Authz DB query
+
+query() ->
+    #{
+        type => binary(),
+        desc => ?DESC(query),
+        required => true,
+        validator => fun(S) ->
+            case size(S) > 0 of
+                true -> ok;
+                _ -> {error, "Request query"}
+            end
+        end
+    }.
+
+%%------------------------------------------------------------------------------
+%% Internal funcs
+
+authz_sources_types(Type) ->
+    case Type of
+        simple ->
+            [http, mongodb, redis];
+        detailed ->
+            [
+                http_get,
+                http_post,
+                mongo_single,
+                mongo_rs,
+                mongo_sharded,
+                redis_single,
+                redis_sentinel,
+                redis_cluster
+            ]
+    end ++
+        [
+            built_in_database,
+            mysql,
+            postgresql,
+            file
+        ].
+
+to_list(A) when is_atom(A) ->
+    atom_to_list(A);
+to_list(B) when is_binary(B) ->
+    binary_to_list(B).

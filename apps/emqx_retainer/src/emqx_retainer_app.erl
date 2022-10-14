@@ -18,15 +18,28 @@
 
 -behaviour(application).
 
--export([ start/2
-        , stop/1
-        ]).
+-include("emqx_retainer.hrl").
+
+-export([
+    start/2,
+    stop/1
+]).
 
 start(_Type, _Args) ->
-    {ok, Sup} = emqx_retainer_sup:start_link(),
-    emqx_retainer_cli:load(),
-    {ok, Sup}.
+    ok = emqx_retainer_mnesia_cli:load(),
+    init_bucket(),
+    emqx_retainer_sup:start_link().
 
 stop(_State) ->
-    emqx_retainer_cli:unload().
+    ok = emqx_retainer_mnesia_cli:unload(),
+    delete_bucket(),
+    ok.
 
+init_bucket() ->
+    #{flow_control := FlowControl} = emqx:get_config([retainer]),
+    emqx_limiter_server:add_bucket(
+        ?APP, internal, maps:get(batch_deliver_limiter, FlowControl, undefined)
+    ).
+
+delete_bucket() ->
+    emqx_limiter_server:del_bucket(?APP, internal).

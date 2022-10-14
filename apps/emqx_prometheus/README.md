@@ -1,6 +1,6 @@
 # emqx-prometheus
 
-EMQ X Prometheus Agent
+EMQX Prometheus Agent
 
 ## push emqx stats/metrics to prometheus PushGateway
 
@@ -48,7 +48,7 @@ json data
 ```
 
 
-## Before EMQ X v4.0.0
+## Before EMQX v4.0.0
 The prometheus data simple is:
 
 
@@ -218,10 +218,6 @@ emqx_connections_max 0
 emqx_retained_count 3
 # TYPE emqx_retained_max gauge
 emqx_retained_max 3
-# TYPE emqx_routes_count gauge
-emqx_routes_count 0
-# TYPE emqx_routes_max gauge
-emqx_routes_max 0
 # TYPE emqx_sessions_count gauge
 emqx_sessions_count 0
 # TYPE emqx_sessions_max gauge
@@ -279,5 +275,5 @@ Apache License Version 2.0
 Author
 ------
 
-EMQ X Team.
+EMQX Team.
 

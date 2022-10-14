@@ -22,6 +22,7 @@
 -export([api_spec/0, fields/1, paths/0, schema/1, namespace/0]).
 -export([api_key/2, api_key_by_name/2]).
 -export([validate_name/1]).
+-define(TAGS, [<<"API Keys">>]).
 
 namespace() -> "api_key".
 
@@ -31,21 +32,23 @@ api_spec() ->
 paths() ->
     ["/api_key", "/api_key/:name"].
 
-
 schema("/api_key") ->
     #{
         'operationId' => api_key,
         get => #{
             description => "Return api_key list",
+            tags => ?TAGS,
             responses => #{
                 200 => delete([api_secret], fields(app))
             }
         },
         post => #{
             description => "Create new api_key",
+            tags => ?TAGS,
             'requestBody' => delete([created_at, api_key, api_secret], fields(app)),
             responses => #{
-                200 => hoconsc:ref(app)
+                200 => hoconsc:ref(app),
+                400 => emqx_dashboard_swagger:error_codes(['BAD_REQUEST'])
             }
         }
     };
@@ -54,65 +57,111 @@ schema("/api_key/:name") ->
         'operationId' => api_key_by_name,
         get => #{
             description => "Return the specific api_key",
+            tags => ?TAGS,
             parameters => [hoconsc:ref(name)],
             responses => #{
-                200 => delete([api_secret], fields(app))
+                200 => delete([api_secret], fields(app)),
+                404 => emqx_dashboard_swagger:error_codes(['NOT_FOUND'])
             }
         },
         put => #{
             description => "Update the specific api_key",
+            tags => ?TAGS,
             parameters => [hoconsc:ref(name)],
             'requestBody' => delete([created_at, api_key, api_secret, name], fields(app)),
             responses => #{
-                200 => delete([api_secret], fields(app))
+                200 => delete([api_secret], fields(app)),
+                404 => emqx_dashboard_swagger:error_codes(['NOT_FOUND'])
             }
         },
         delete => #{
             description => "Delete the specific api_key",
+            tags => ?TAGS,
             parameters => [hoconsc:ref(name)],
             responses => #{
-                204 => <<"Delete successfully">>
+                204 => <<"Delete successfully">>,
+                404 => emqx_dashboard_swagger:error_codes(['NOT_FOUND'])
             }
         }
     }.
 
 fields(app) ->
     [
-        {name, hoconsc:mk(binary(),
-            #{desc => "Unique and format by [a-zA-Z0-9-_]",
-                validator => fun ?MODULE:validate_name/1,
-                example => <<"EMQX-API-KEY-1">>})},
-        {api_key, hoconsc:mk(binary(),
-            #{desc => """TODO:uses HMAC-SHA256 for signing.""",
-                example => <<"a4697a5c75a769f6">>})},
-        {api_secret, hoconsc:mk(binary(),
-            #{desc => """An API secret is a simple encrypted string that identifies"""
-            """an application without any principal."""
-            """They are useful for accessing public data anonymously,"""
-            """and are used to associate API requests.""",
-                example => <<"MzAyMjk3ODMwMDk0NjIzOTUxNjcwNzQ0NzQ3MTE2NDYyMDI">>})},
-        {expired_at, hoconsc:mk(hoconsc:union([undefined, emqx_schema:rfc3339_system_time()]),
-            #{desc => "No longer valid datetime",
-                example => <<"2021-12-05T02:01:34.186Z">>,
-                nullable => true,
-                default => undefined
-            })},
-        {created_at, hoconsc:mk(emqx_schema:rfc3339_system_time(),
-            #{desc => "ApiKey create datetime",
-                example => <<"2021-12-01T00:00:00.000Z">>
-            })},
-        {desc, hoconsc:mk(binary(),
-            #{example => <<"Note">>, nullable => true})},
-        {enable, hoconsc:mk(boolean(), #{desc => "Enable/Disable", nullable => true})}
+        {name,
+            hoconsc:mk(
+                binary(),
+                #{
+                    desc => "Unique and format by [a-zA-Z0-9-_]",
+                    validator => fun ?MODULE:validate_name/1,
+                    example => <<"EMQX-API-KEY-1">>
+                }
+            )},
+        {api_key,
+            hoconsc:mk(
+                binary(),
+                #{
+                    desc => "" "TODO:uses HMAC-SHA256 for signing." "",
+                    example => <<"a4697a5c75a769f6">>
+                }
+            )},
+        {api_secret,
+            hoconsc:mk(
+                binary(),
+                #{
+                    desc =>
+                        ""
+                        "An API secret is a simple encrypted string that identifies"
+                        ""
+                        ""
+                        "an application without any principal."
+                        ""
+                        ""
+                        "They are useful for accessing public data anonymously,"
+                        ""
+                        ""
+                        "and are used to associate API requests."
+                        "",
+                    example => <<"MzAyMjk3ODMwMDk0NjIzOTUxNjcwNzQ0NzQ3MTE2NDYyMDI">>
+                }
+            )},
+        {expired_at,
+            hoconsc:mk(
+                hoconsc:union([infinity, emqx_datetime:epoch_second()]),
+                #{
+                    desc => "No longer valid datetime",
+                    example => <<"2021-12-05T02:01:34.186Z">>,
+                    required => false,
+                    default => infinity
+                }
+            )},
+        {created_at,
+            hoconsc:mk(
+                emqx_datetime:epoch_second(),
+                #{
+                    desc => "ApiKey create datetime",
+                    example => <<"2021-12-01T00:00:00.000Z">>
+                }
+            )},
+        {desc,
+            hoconsc:mk(
+                binary(),
+                #{example => <<"Note">>, required => false}
+            )},
+        {enable, hoconsc:mk(boolean(), #{desc => "Enable/Disable", required => false})},
+        {expired, hoconsc:mk(boolean(), #{desc => "Expired", required => false})}
     ];
 fields(name) ->
-    [{name, hoconsc:mk(binary(),
-        #{
-            desc => <<"[a-zA-Z0-9-_]">>,
-            example => <<"EMQX-API-KEY-1">>,
-            in => path,
-            validator => fun ?MODULE:validate_name/1
-        })}
+    [
+        {name,
+            hoconsc:mk(
+                binary(),
+                #{
+                    desc => <<"^[A-Za-z]+[A-Za-z0-9-_]*$">>,
+                    example => <<"EMQX-API-KEY-1">>,
+                    in => path,
+                    validator => fun ?MODULE:validate_name/1
+                }
+            )}
     ].
 
 -define(NAME_RE, "^[A-Za-z]+[A-Za-z0-9-_]*$").
@@ -125,7 +174,8 @@ validate_name(Name) ->
                 nomatch -> {error, "Name should be " ?NAME_RE};
                 _ -> ok
             end;
-        false -> {error, "Name Length must =< 256"}
+        false ->
+            {error, "Name Length must =< 256"}
     end.
 
 delete(Keys, Fields) ->
@@ -142,19 +192,26 @@ api_key(post, #{body := App}) ->
     ExpiredAt = ensure_expired_at(App),
     Desc = unicode:characters_to_binary(Desc0, unicode),
     case emqx_mgmt_auth:create(Name, Enable, ExpiredAt, Desc) of
-        {ok, NewApp} -> {200, format(NewApp)};
-        {error, Reason} -> {400, io_lib:format("~p", [Reason])}
+        {ok, NewApp} ->
+            {200, format(NewApp)};
+        {error, Reason} ->
+            {400, #{
+                code => 'BAD_REQUEST',
+                message => iolist_to_binary(io_lib:format("~p", [Reason]))
+            }}
     end.
+
+-define(NOT_FOUND_RESPONSE, #{code => 'NOT_FOUND', message => <<"Name NOT FOUND">>}).
 
 api_key_by_name(get, #{bindings := #{name := Name}}) ->
     case emqx_mgmt_auth:read(Name) of
         {ok, App} -> {200, format(App)};
-        {error, not_found} -> {404, <<"NOT_FOUND">>}
+        {error, not_found} -> {404, ?NOT_FOUND_RESPONSE}
     end;
 api_key_by_name(delete, #{bindings := #{name := Name}}) ->
     case emqx_mgmt_auth:delete(Name) of
         {ok, _} -> {204};
-        {error, not_found} -> {404, <<"NOT_FOUND">>}
+        {error, not_found} -> {404, ?NOT_FOUND_RESPONSE}
     end;
 api_key_by_name(put, #{bindings := #{name := Name}, body := Body}) ->
     Enable = maps:get(<<"enable">>, Body, undefined),
@@ -162,13 +219,13 @@ api_key_by_name(put, #{bindings := #{name := Name}, body := Body}) ->
     Desc = maps:get(<<"desc">>, Body, undefined),
     case emqx_mgmt_auth:update(Name, Enable, ExpiredAt, Desc) of
         {ok, App} -> {200, format(App)};
-        {error, not_found} -> {404, <<"NOT_FOUND">>}
+        {error, not_found} -> {404, ?NOT_FOUND_RESPONSE}
     end.
 
 format(App = #{expired_at := ExpiredAt0, created_at := CreateAt}) ->
     ExpiredAt =
         case ExpiredAt0 of
-            undefined -> <<"undefined">>;
+            infinity -> <<"infinity">>;
             _ -> list_to_binary(calendar:system_time_to_rfc3339(ExpiredAt0))
         end,
     App#{
@@ -176,5 +233,5 @@ format(App = #{expired_at := ExpiredAt0, created_at := CreateAt}) ->
         created_at => list_to_binary(calendar:system_time_to_rfc3339(CreateAt))
     }.
 
-ensure_expired_at(#{<<"expired_at">> := ExpiredAt})when is_integer(ExpiredAt) -> ExpiredAt;
-ensure_expired_at(_) -> undefined.
+ensure_expired_at(#{<<"expired_at">> := ExpiredAt}) when is_integer(ExpiredAt) -> ExpiredAt;
+ensure_expired_at(_) -> infinity.

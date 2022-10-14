@@ -18,26 +18,21 @@
 
 -behaviour(emqx_bpapi).
 
--export([ introduced_in/0
-
-        , get_uuid/1
-        , enable_telemetry/1
-        , disable_telemetry/1
-        ]).
+-export([
+    introduced_in/0,
+    get_node_uuid/1,
+    get_cluster_uuid/1
+]).
 
 -include_lib("emqx/include/bpapi.hrl").
 
 introduced_in() ->
     "5.0.0".
 
--spec get_uuid(node()) -> {ok, binary()} | emqx_rpc:badrpc().
-get_uuid(Node) ->
-    rpc:call(Node, emqx_telemetry, get_uuid, []).
+-spec get_node_uuid(node()) -> {ok, binary()} | emqx_rpc:badrpc().
+get_node_uuid(Node) ->
+    rpc:call(Node, emqx_telemetry, get_node_uuid, []).
 
--spec enable_telemetry(node()) -> _.
-enable_telemetry(Node) ->
-    rpc:call(Node, emqx_telemetry, enable, []).
-
--spec disable_telemetry(node()) -> _.
-disable_telemetry(Node) ->
-    rpc:call(Node, emqx_telemetry, disable, []).
+-spec get_cluster_uuid(node()) -> {ok, binary()} | emqx_rpc:badrpc().
+get_cluster_uuid(Node) ->
+    rpc:call(Node, emqx_telemetry, get_cluster_uuid, []).

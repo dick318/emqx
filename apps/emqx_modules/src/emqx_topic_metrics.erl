@@ -21,42 +21,48 @@
 -include_lib("emqx/include/emqx.hrl").
 -include_lib("emqx/include/logger.hrl").
 -include_lib("emqx/include/emqx_mqtt.hrl").
+-include_lib("snabbkaffe/include/snabbkaffe.hrl").
+-include_lib("emqx/include/emqx_hooks.hrl").
 
-
--export([ on_message_publish/1
-        , on_message_delivered/2
-        , on_message_dropped/3
-        ]).
+-export([
+    on_message_publish/1,
+    on_message_delivered/2,
+    on_message_dropped/3
+]).
 
 %% API functions
--export([ start_link/0
-        , stop/0
-        ]).
+-export([
+    start_link/0,
+    stop/0
+]).
 
--export([ enable/0
-        , disable/0
-        ]).
+-export([
+    enable/0,
+    disable/0
+]).
 
--export([ max_limit/0]).
+-export([max_limit/0]).
 
--export([ metrics/0
-        , metrics/1
-        , register/1
-        , deregister/1
-        , deregister_all/0
-        , is_registered/1
-        , all_registered_topics/0
-        , reset/0
-        , reset/1
-        ]).
+-export([
+    metrics/0,
+    metrics/1,
+    register/1,
+    deregister/1,
+    deregister_all/0,
+    is_registered/1,
+    all_registered_topics/0,
+    reset/0,
+    reset/1
+]).
 
 %% gen_server callbacks
--export([ init/1
-        , handle_call/3
-        , handle_info/2
-        , handle_cast/2
-        , terminate/2
-        ]).
+-export([
+    init/1,
+    handle_call/3,
+    handle_info/2,
+    handle_cast/2,
+    terminate/2
+]).
 
 -ifdef(TEST).
 -compile(export_all).
@@ -66,17 +72,17 @@
 -define(MAX_TOPICS, 512).
 -define(TAB, ?MODULE).
 
--define(TOPIC_METRICS,
-        ['messages.in',
-         'messages.out',
-         'messages.qos0.in',
-         'messages.qos0.out',
-         'messages.qos1.in',
-         'messages.qos1.out',
-         'messages.qos2.in',
-         'messages.qos2.out',
-         'messages.dropped'
-        ]).
+-define(TOPIC_METRICS, [
+    'messages.in',
+    'messages.out',
+    'messages.qos0.in',
+    'messages.qos0.out',
+    'messages.qos1.in',
+    'messages.qos1.out',
+    'messages.qos2.in',
+    'messages.qos2.out',
+    'messages.dropped'
+]).
 
 -define(TICKING_INTERVAL, 1).
 -define(SPEED_AVERAGE_WINDOW_SIZE, 5).
@@ -84,15 +90,15 @@
 -define(SPEED_LONG_WINDOW_SIZE, 300).
 
 -record(speed, {
-            last = 0 :: number(),
-            last_v = 0 :: number(),
-            last_medium = 0 :: number(),
-            last_long = 0 :: number()
-        }).
+    last = 0 :: number(),
+    last_v = 0 :: number(),
+    last_medium = 0 :: number(),
+    last_long = 0 :: number()
+}).
 
 -record(state, {
-            speeds :: #{{binary(), atom()} => #speed{}}
-        }).
+    speeds :: #{{binary(), atom()} => #speed{}}
+}).
 
 %%------------------------------------------------------------------------------
 %% APIs
@@ -101,9 +107,9 @@ max_limit() ->
     ?MAX_TOPICS.
 
 enable() ->
-    emqx_hooks:put('message.publish', {?MODULE, on_message_publish, []}),
-    emqx_hooks:put('message.dropped', {?MODULE, on_message_dropped, []}),
-    emqx_hooks:put('message.delivered', {?MODULE, on_message_delivered, []}).
+    emqx_hooks:put('message.publish', {?MODULE, on_message_publish, []}, ?HP_TOPIC_METRICS),
+    emqx_hooks:put('message.dropped', {?MODULE, on_message_dropped, []}, ?HP_TOPIC_METRICS),
+    emqx_hooks:put('message.delivered', {?MODULE, on_message_delivered, []}, ?HP_TOPIC_METRICS).
 
 disable() ->
     emqx_hooks:del('message.publish', {?MODULE, on_message_publish}),
@@ -208,6 +214,7 @@ init([Opts]) ->
                     error("max topic metrics quota exceeded")
             end
         end,
+    ?tp(debug, emqx_topic_metrics_started, #{}),
     {ok, #state{speeds = lists:foldl(Fun, #{}, Opts)}, hibernate}.
 
 handle_call({register, Topic}, _From, State = #state{speeds = Speeds}) ->
@@ -217,34 +224,33 @@ handle_call({register, Topic}, _From, State = #state{speeds = Speeds}) ->
         Error ->
             {reply, Error, State}
     end;
-
 handle_call({deregister, all}, _From, State) ->
     true = ets:delete_all_objects(?TAB),
     {reply, ok, State#state{speeds = #{}}};
-
 handle_call({deregister, Topic}, _From, State = #state{speeds = Speeds}) ->
     case is_registered(Topic) of
         false ->
             {reply, {error, topic_not_found}, State};
         true ->
             true = ets:delete(?TAB, Topic),
-            NSpeeds = lists:foldl(fun(Metric, Acc) ->
-                                      maps:remove({Topic, Metric}, Acc)
-                                  end, Speeds, ?TOPIC_METRICS),
+            NSpeeds = lists:foldl(
+                fun(Metric, Acc) ->
+                    maps:remove({Topic, Metric}, Acc)
+                end,
+                Speeds,
+                ?TOPIC_METRICS
+            ),
             {reply, ok, State#state{speeds = NSpeeds}}
     end;
-
 handle_call({reset, all}, _From, State = #state{speeds = Speeds}) ->
     Fun =
         fun(T, NSpeeds) ->
             reset_topic(T, NSpeeds)
         end,
     {reply, ok, State#state{speeds = lists:foldl(Fun, Speeds, ets:tab2list(?TAB))}};
-
 handle_call({reset, Topic}, _From, State = #state{speeds = Speeds}) ->
     NSpeeds = reset_topic(Topic, Speeds),
     {reply, ok, State#state{speeds = NSpeeds}};
-
 handle_call({get_rates, Topic, Metric}, _From, State = #state{speeds = Speeds}) ->
     case is_registered(Topic) of
         false ->
@@ -253,28 +259,29 @@ handle_call({get_rates, Topic, Metric}, _From, State = #state{speeds = Speeds}) 
             case maps:get({Topic, Metric}, Speeds, undefined) of
                 undefined ->
                     {reply, {error, invalid_metric}, State};
-                #speed{last = Short, last_medium = Medium, last_long = Long}  ->
-                    {reply, #{short => Short, medium => Medium, long => Long }, State}
+                #speed{last = Short, last_medium = Medium, last_long = Long} ->
+                    {reply, #{short => Short, medium => Medium, long => Long}, State}
             end
     end.
 
 handle_cast(Msg, State) ->
-    ?SLOG(error, #{msg => "unexpected_cast", cast => Msg}),
+    ?tp(error, emqx_topic_metrics_unexpected_cast, #{cast => Msg}),
     {noreply, State}.
 
 handle_info(ticking, State = #state{speeds = Speeds}) ->
     NSpeeds = maps:map(
-            fun({Topic, Metric}, Speed) ->
-                case val(Topic, Metric) of
-                    {error, topic_not_found} -> maps:remove({Topic, Metric}, Speeds);
-                    Val -> calculate_speed(Val, Speed)
-                end
-            end, Speeds),
+        fun({Topic, Metric}, Speed) ->
+            case val(Topic, Metric) of
+                {error, topic_not_found} -> maps:remove({Topic, Metric}, Speeds);
+                Val -> calculate_speed(Val, Speed)
+            end
+        end,
+        Speeds
+    ),
     erlang:send_after(timer:seconds(?TICKING_INTERVAL), self(), ticking),
     {noreply, State#state{speeds = NSpeeds}};
-
 handle_info(Info, State) ->
-    ?SLOG(error, #{msg => "unexpected_info", info => Info}),
+    ?tp(error, emqx_topic_metrics_unexpected_info, #{info => Info}),
     {noreply, State}.
 
 terminate(_Reason, _State) ->
@@ -303,24 +310,27 @@ do_register(Topic, Speeds) ->
             {error, already_existed};
         false ->
             case {number_of_registered_topics() < ?MAX_TOPICS, emqx_topic:wildcard(Topic)} of
+                {_, true} ->
+                    {error, bad_topic};
+                {false, _} ->
+                    {error, quota_exceeded};
                 {true, false} ->
                     CreateTime = emqx_rule_funcs:now_rfc3339(),
                     CRef = counters:new(counters_size(), [write_concurrency]),
                     ok = reset_counter(CRef),
                     Data = #{
                         counter_ref => CRef,
-                        create_time => CreateTime},
+                        create_time => CreateTime
+                    },
                     true = ets:insert(?TAB, {Topic, Data}),
-                    NSpeeds = lists:foldl(fun(Metric, Acc) ->
-                                              maps:put({Topic, Metric}, #speed{}, Acc)
-                                          end, Speeds, ?TOPIC_METRICS),
-                    {ok, NSpeeds};
-                {true, true} ->
-                    {error, bad_topic};
-                {false, false} ->
-                    {error, quota_exceeded};
-                {false, true} ->
-                    {error, {quota_exceeded, bad_topic}}
+                    NSpeeds = lists:foldl(
+                        fun(Metric, Acc) ->
+                            maps:put({Topic, Metric}, #speed{}, Acc)
+                        end,
+                        Speeds,
+                        ?TOPIC_METRICS
+                    ),
+                    {ok, NSpeeds}
             end
     end.
 
@@ -329,9 +339,9 @@ format({Topic, Data}) ->
     Fun =
         fun(Key, Metrics) ->
             CounterKey = to_count(Key),
-            Counter    = counters:get(CRef, metric_idx(Key)),
-            RateKey    = to_rate(Key),
-            Rate       = emqx_rule_funcs:float(rate(Topic, Key), 4),
+            Counter = counters:get(CRef, metric_idx(Key)),
+            RateKey = to_rate(Key),
+            Rate = emqx_rule_funcs:float(rate(Topic, Key), 4),
             maps:put(RateKey, Rate, maps:put(CounterKey, Counter, Metrics))
         end,
     Metrics = lists:foldl(Fun, #{}, ?TOPIC_METRICS),
@@ -390,17 +400,16 @@ rate(Topic, Metric) ->
             {error, Reason}
     end.
 
-metric_idx('messages.in') ->       01;
-metric_idx('messages.out') ->      02;
-metric_idx('messages.qos0.in') ->  03;
+metric_idx('messages.in') -> 01;
+metric_idx('messages.out') -> 02;
+metric_idx('messages.qos0.in') -> 03;
 metric_idx('messages.qos0.out') -> 04;
-metric_idx('messages.qos1.in') ->  05;
+metric_idx('messages.qos1.in') -> 05;
 metric_idx('messages.qos1.out') -> 06;
-metric_idx('messages.qos2.in') ->  07;
+metric_idx('messages.qos2.in') -> 07;
 metric_idx('messages.qos2.out') -> 08;
-metric_idx('messages.dropped') ->  09;
-metric_idx(_) ->
-    {error, invalid_metric}.
+metric_idx('messages.dropped') -> 09;
+metric_idx(_) -> {error, invalid_metric}.
 
 to_count('messages.in') ->
     'messages.in.count';
@@ -456,7 +465,8 @@ counters_size() ->
 number_of_registered_topics() ->
     proplists:get_value(size, ets:info(?TAB)).
 
-calculate_speed(CurVal, #speed{last = Last,
+calculate_speed(CurVal, #speed{
+    last = Last,
     last_v = LastVal,
     last_medium = LastMedium,
     last_long = LastLong

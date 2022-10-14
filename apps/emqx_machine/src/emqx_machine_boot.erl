@@ -22,12 +22,17 @@
 -export([sorted_reboot_apps/0]).
 -export([start_autocluster/0]).
 
+-dialyzer({no_match, [basic_reboot_apps/0]}).
+
 -ifdef(TEST).
 -export([sorted_reboot_apps/1]).
 -endif.
 
 %% these apps are always (re)started by emqx_machine
 -define(BASIC_REBOOT_APPS, [gproc, esockd, ranch, cowboy, emqx]).
+
+%% If any of these applications crash, the entire EMQX node shuts down
+-define(BASIC_PERMANENT_APPS, [mria, ekka, esockd, emqx]).
 
 post_boot() ->
     ok = ensure_apps_started(),
@@ -37,16 +42,18 @@ post_boot() ->
 
 -ifdef(TEST).
 print_vsn() -> ok.
--else. % TEST
+% TEST
+-else.
 print_vsn() ->
     ?ULOG("~ts ~ts is running now!~n", [emqx_app:get_description(), emqx_app:get_release()]).
--endif. % TEST
-
+% TEST
+-endif.
 
 start_autocluster() ->
     ekka:callback(stop, fun emqx_machine_boot:stop_apps/0),
     ekka:callback(start, fun emqx_machine_boot:ensure_apps_started/0),
-    _ = ekka:autocluster(emqx), %% returns 'ok' or a pid or 'any()' as in spec
+    %% returns 'ok' or a pid or 'any()' as in spec
+    _ = ekka:autocluster(emqx),
     ok.
 
 stop_apps() ->
@@ -59,11 +66,13 @@ stop_one_app(App) ->
     try
         _ = application:stop(App)
     catch
-        C : E ->
-            ?SLOG(error, #{msg => "failed_to_stop_app",
+        C:E ->
+            ?SLOG(error, #{
+                msg => "failed_to_stop_app",
                 app => App,
                 exception => C,
-                reason => E})
+                reason => E
+            })
     end.
 
 ensure_apps_started() ->
@@ -72,7 +81,7 @@ ensure_apps_started() ->
 
 start_one_app(App) ->
     ?SLOG(debug, #{msg => "starting_app", app => App}),
-    case application:ensure_all_started(App) of
+    case application:ensure_all_started(App, restart_type(App)) of
         {ok, Apps} ->
             ?SLOG(debug, #{msg => "started_apps", apps => Apps});
         {error, Reason} ->
@@ -80,15 +89,54 @@ start_one_app(App) ->
             error({failed_to_start_app, App, Reason})
     end.
 
+restart_type(App) ->
+    PermanentApps =
+        ?BASIC_PERMANENT_APPS ++ application:get_env(emqx_machine, permanent_applications, []),
+    case lists:member(App, PermanentApps) of
+        true ->
+            permanent;
+        false ->
+            temporary
+    end.
+
 %% list of app names which should be rebooted when:
 %% 1. due to static config change
 %% 2. after join a cluster
 
 %% the list of (re)started apps depends on release type/edition
-%% and is configured in rebar.config.erl/mix.exs
 reboot_apps() ->
-    {ok, Apps} = application:get_env(emqx_machine, applications),
-    ?BASIC_REBOOT_APPS ++ Apps.
+    {ok, ConfigApps0} = application:get_env(emqx_machine, applications),
+    BaseRebootApps = basic_reboot_apps(),
+    ConfigApps = lists:filter(fun(App) -> not lists:member(App, BaseRebootApps) end, ConfigApps0),
+    BaseRebootApps ++ ConfigApps.
+
+basic_reboot_apps() ->
+    CE =
+        ?BASIC_REBOOT_APPS ++
+            [
+                emqx_prometheus,
+                emqx_modules,
+                emqx_dashboard,
+                emqx_connector,
+                emqx_gateway,
+                emqx_statsd,
+                emqx_resource,
+                emqx_rule_engine,
+                emqx_bridge,
+                emqx_plugin_libs,
+                emqx_management,
+                emqx_retainer,
+                emqx_exhook,
+                emqx_authn,
+                emqx_authz,
+                emqx_slow_subs,
+                emqx_auto_subscribe,
+                emqx_plugins
+            ],
+    case emqx_release:edition() of
+        ce -> CE;
+        ee -> CE ++ []
+    end.
 
 sorted_reboot_apps() ->
     Apps = [{App, app_deps(App)} || App <- reboot_apps()],
@@ -121,16 +169,21 @@ sorted_reboot_apps(Apps) ->
 %% Isolated apps without which are not dependency of any other apps are
 %% put to the end of the list in the original order.
 add_apps_to_digraph(G, Apps) ->
-    lists:foldl(fun
+    lists:foldl(
+        fun
             ({App, undefined}, Acc) ->
                 ?SLOG(debug, #{msg => "app_is_not_loaded", app => App}),
                 Acc;
             ({App, []}, Acc) ->
-                Acc ++ [App]; %% use '++' to keep the original order
+                %% use '++' to keep the original order
+                Acc ++ [App];
             ({App, Deps}, Acc) ->
                 add_app_deps_to_digraph(G, App, Deps),
                 Acc
-        end, [], Apps).
+        end,
+        [],
+        Apps
+    ).
 
 add_app_deps_to_digraph(G, App, undefined) ->
     ?SLOG(debug, #{msg => "app_is_not_loaded", app => App}),
@@ -141,14 +194,17 @@ add_app_deps_to_digraph(_G, _App, []) ->
 add_app_deps_to_digraph(G, App, [Dep | Deps]) ->
     digraph:add_vertex(G, App),
     digraph:add_vertex(G, Dep),
-    digraph:add_edge(G, Dep, App), %% dep -> app as dependency
+    %% dep -> app as dependency
+    digraph:add_edge(G, Dep, App),
     add_app_deps_to_digraph(G, App, Deps).
 
 find_loops(G) ->
     lists:filtermap(
-        fun (App) ->
+        fun(App) ->
             case digraph:get_short_cycle(G, App) of
                 false -> false;
                 Apps -> {true, Apps}
             end
-        end, digraph:vertices(G)).
+        end,
+        digraph:vertices(G)
+    ).

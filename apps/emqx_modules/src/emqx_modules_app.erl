@@ -18,9 +18,10 @@
 
 -behaviour(application).
 
--export([ start/2
-        , stop/1
-        ]).
+-export([
+    start/2,
+    stop/1
+]).
 
 start(_Type, _Args) ->
     {ok, Sup} = emqx_modules_sup:start_link(),
@@ -32,20 +33,18 @@ stop(_State) ->
     ok.
 
 maybe_enable_modules() ->
-    emqx_conf:get([delayed, enable], true) andalso emqx_delayed:enable(),
-    emqx_conf:get([telemetry, enable], true) andalso emqx_telemetry:enable(),
-    emqx_conf:get([observer_cli, enable], true) andalso emqx_observer_cli:enable(),
-    emqx_event_message:enable(),
+    emqx_conf:get([delayed, enable], true) andalso emqx_delayed:load(),
+    emqx_modules_conf:is_telemetry_enabled() andalso emqx_telemetry:enable(),
+    emqx_observer_cli:enable(),
     emqx_conf_cli:load(),
     ok = emqx_rewrite:enable(),
     emqx_topic_metrics:enable(),
     emqx_modules_conf:load().
 
 maybe_disable_modules() ->
-    emqx_conf:get([delayed, enable], true) andalso emqx_delayed:disable(),
-    emqx_conf:get([telemetry, enable], true) andalso emqx_telemetry:disable(),
+    emqx_conf:get([delayed, enable], true) andalso emqx_delayed:unload(),
+    emqx_modules_conf:is_telemetry_enabled() andalso emqx_telemetry:disable(),
     emqx_conf:get([observer_cli, enable], true) andalso emqx_observer_cli:disable(),
-    emqx_event_message:disable(),
     emqx_rewrite:disable(),
     emqx_conf_cli:unload(),
     emqx_topic_metrics:disable(),

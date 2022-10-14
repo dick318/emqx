@@ -17,17 +17,23 @@
 -module(emqx_access_control).
 
 -include("emqx.hrl").
+-include("logger.hrl").
 
--export([ authenticate/1
-        , authorize/3
-        ]).
+-export([
+    authenticate/1,
+    authorize/3
+]).
 
 %%--------------------------------------------------------------------
 %% APIs
 %%--------------------------------------------------------------------
 
--spec(authenticate(emqx_types:clientinfo()) ->
-    {ok, map()} | {ok, map(), binary()} | {continue, map()} | {continue, binary(), map()} | {error, term()}).
+-spec authenticate(emqx_types:clientinfo()) ->
+    {ok, map()}
+    | {ok, map(), binary()}
+    | {continue, map()}
+    | {continue, binary(), map()}
+    | {error, term()}.
 authenticate(Credential) ->
     case run_hooks('client.authenticate', [Credential], {ok, #{is_superuser => false}}) of
         ok ->
@@ -37,14 +43,16 @@ authenticate(Credential) ->
     end.
 
 %% @doc Check Authorization
--spec authorize(emqx_types:clientinfo(), emqx_types:pubsub(), emqx_types:topic())
-      -> allow | deny.
+-spec authorize(emqx_types:clientinfo(), emqx_types:pubsub(), emqx_types:topic()) ->
+    allow | deny.
 authorize(ClientInfo, PubSub, Topic) ->
-    Result = case emqx_authz_cache:is_enabled() of
-        true  -> check_authorization_cache(ClientInfo, PubSub, Topic);
-        false -> do_authorize(ClientInfo, PubSub, Topic)
-    end,
-    inc_acl_metrics(Result), Result.
+    Result =
+        case emqx_authz_cache:is_enabled() of
+            true -> check_authorization_cache(ClientInfo, PubSub, Topic);
+            false -> do_authorize(ClientInfo, PubSub, Topic)
+        end,
+    inc_authz_metrics(Result),
+    Result.
 
 check_authorization_cache(ClientInfo, PubSub, Topic) ->
     case emqx_authz_cache:get_authz_cache(PubSub, Topic) of
@@ -53,15 +61,36 @@ check_authorization_cache(ClientInfo, PubSub, Topic) ->
             emqx_authz_cache:put_authz_cache(PubSub, Topic, AuthzResult),
             AuthzResult;
         AuthzResult ->
-            inc_acl_metrics(cache_hit),
+            emqx:run_hook(
+                'client.check_authz_complete',
+                [ClientInfo, PubSub, Topic, AuthzResult, cache]
+            ),
+            inc_authz_metrics(cache_hit),
             AuthzResult
     end.
 
 do_authorize(ClientInfo, PubSub, Topic) ->
     NoMatch = emqx:get_config([authorization, no_match], allow),
-    case run_hooks('client.authorize', [ClientInfo, PubSub, Topic], NoMatch) of
-        allow  -> allow;
-        _Other -> deny
+    Default = #{result => NoMatch, from => default},
+    case run_hooks('client.authorize', [ClientInfo, PubSub, Topic], Default) of
+        AuthzResult = #{result := Result} when Result == allow; Result == deny ->
+            From = maps:get(from, AuthzResult, unknown),
+            emqx:run_hook(
+                'client.check_authz_complete',
+                [ClientInfo, PubSub, Topic, Result, From]
+            ),
+            Result;
+        Other ->
+            ?SLOG(error, #{
+                msg => "unknown_authorization_return_format",
+                expected_example => "#{result => allow, from => default}",
+                got => Other
+            }),
+            emqx:run_hook(
+                'client.check_authz_complete',
+                [ClientInfo, PubSub, Topic, deny, unknown_return_format]
+            ),
+            deny
     end.
 
 -compile({inline, [run_hooks/3]}).
@@ -69,10 +98,10 @@ run_hooks(Name, Args, Acc) ->
     ok = emqx_metrics:inc(Name),
     emqx_hooks:run_fold(Name, Args, Acc).
 
--compile({inline, [inc_acl_metrics/1]}).
-inc_acl_metrics(allow) ->
-    emqx_metrics:inc('client.acl.allow');
-inc_acl_metrics(deny) ->
-    emqx_metrics:inc('client.acl.deny');
-inc_acl_metrics(cache_hit) ->
-    emqx_metrics:inc('client.acl.cache_hit').
+-compile({inline, [inc_authz_metrics/1]}).
+inc_authz_metrics(allow) ->
+    emqx_metrics:inc('authorization.allow');
+inc_authz_metrics(deny) ->
+    emqx_metrics:inc('authorization.deny');
+inc_authz_metrics(cache_hit) ->
+    emqx_metrics:inc('authorization.cache_hit').

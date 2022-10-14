@@ -19,30 +19,40 @@
 -behaviour(gen_server).
 
 -include_lib("emqx/include/logger.hrl").
+-include_lib("emqx/include/emqx_hooks.hrl").
 
--export([ load/0
-        , unload/0
-        , on_psk_lookup/2
-        , import/1
-        ]).
+-export([
+    load/0,
+    unload/0,
+    on_psk_lookup/2,
+    import/1
+]).
 
--export([ start_link/0
-        , stop/0
-        ]).
+-export([
+    start_link/0,
+    stop/0
+]).
 
 %% gen_server callbacks
--export([ init/1
-        , handle_call/3
-        , handle_cast/2
-        , handle_info/2
-        , terminate/2
-        , code_change/3
-        ]).
+-export([
+    init/1,
+    handle_call/3,
+    handle_cast/2,
+    handle_info/2,
+    terminate/2,
+    code_change/3
+]).
 
--record(psk_entry, {psk_id :: binary(),
-                    shared_secret :: binary(),
-                    extra :: term()
-                    }).
+%% Internal exports (RPC)
+-export([
+    insert_psks/1
+]).
+
+-record(psk_entry, {
+    psk_id :: binary(),
+    shared_secret :: binary(),
+    extra :: term()
+}).
 
 -export([mnesia/1]).
 
@@ -56,30 +66,35 @@
 -define(CR, 13).
 -define(LF, 10).
 
+-ifdef(TEST).
+-export([call/1, trim_crlf/1]).
+-endif.
+
 %%------------------------------------------------------------------------------
 %% Mnesia bootstrap
 %%------------------------------------------------------------------------------
 
 %% @doc Create or replicate tables.
--spec(mnesia(boot | copy) -> ok).
+-spec mnesia(boot | copy) -> ok.
 mnesia(boot) ->
     ok = mria:create_table(?TAB, [
-                {rlog_shard, ?PSK_SHARD},
-                {type, ordered_set},
-                {storage, disc_copies},
-                {record_name, psk_entry},
-                {attributes, record_info(fields, psk_entry)},
-                {storage_properties, [{ets, [{read_concurrency, true}]}]}]).
+        {rlog_shard, ?PSK_SHARD},
+        {type, ordered_set},
+        {storage, disc_copies},
+        {record_name, psk_entry},
+        {attributes, record_info(fields, psk_entry)},
+        {storage_properties, [{ets, [{read_concurrency, true}]}]}
+    ]).
 
 %%------------------------------------------------------------------------------
 %% APIs
 %%------------------------------------------------------------------------------
 
 load() ->
-    emqx:hook('tls_handshake.psk_lookup', {?MODULE, on_psk_lookup, []}).
+    ok = emqx_hooks:put('tls_handshake.psk_lookup', {?MODULE, on_psk_lookup, []}, ?HP_PSK).
 
 unload() ->
-    emqx:unhook('tls_handshake.psk_lookup', {?MODULE, on_psk_lookup, []}).
+    ok = emqx_hooks:del('tls_handshake.psk_lookup', {?MODULE, on_psk_lookup}).
 
 on_psk_lookup(PSKIdentity, _UserState) ->
     case mnesia:dirty_read(?TAB, PSKIdentity) of
@@ -105,11 +120,13 @@ stop() ->
 %%--------------------------------------------------------------------
 
 init(_Opts) ->
-    _ = case get_config(enable) of
+    _ =
+        case get_config(enable) of
             true -> load();
             false -> ?SLOG(info, #{msg => "emqx_psk_disabled"})
         end,
-    _ = case get_config(init_file) of
+    _ =
+        case get_config(init_file) of
             undefined -> ok;
             InitFile -> import_psks(InitFile)
         end,
@@ -117,7 +134,6 @@ init(_Opts) ->
 
 handle_call({import, SrcFile}, _From, State) ->
     {reply, import_psks(SrcFile), State};
-
 handle_call(Req, _From, State) ->
     ?SLOG(info, #{msg => "unexpected_call_discarded", req => Req}),
     {reply, {error, unexpected}, State}.
@@ -153,25 +169,32 @@ get_config(chunk_size) ->
 import_psks(SrcFile) ->
     case file:open(SrcFile, [read, raw, binary, read_ahead]) of
         {error, Reason} ->
-            ?SLOG(error, #{msg => "failed_to_open_psk_file",
-                                   file => SrcFile,
-                                   reason => Reason}),
+            ?SLOG(error, #{
+                msg => "failed_to_open_psk_file",
+                file => SrcFile,
+                reason => Reason
+            }),
             {error, Reason};
         {ok, Io} ->
             try import_psks(Io, get_config(separator), get_config(chunk_size), 0) of
-                ok -> ok;
+                ok ->
+                    ok;
                 {error, Reason} ->
-                    ?SLOG(error, #{msg => "failed_to_import_psk_file",
-                                   file => SrcFile,
-                                   reason => Reason}),
+                    ?SLOG(error, #{
+                        msg => "failed_to_import_psk_file",
+                        file => SrcFile,
+                        reason => Reason
+                    }),
                     {error, Reason}
             catch
                 Exception:Reason:Stacktrace ->
-                    ?SLOG(error, #{msg => "failed_to_import_psk_file",
-                                   file => SrcFile,
-                                   exception => Exception,
-                                   reason => Reason,
-                                   stacktrace => Stacktrace}),
+                    ?SLOG(error, #{
+                        msg => "failed_to_import_psk_file",
+                        file => SrcFile,
+                        exception => Exception,
+                        reason => Reason,
+                        stacktrace => Stacktrace
+                    }),
                     {error, Reason}
             after
                 _ = file:close(Io)
@@ -181,10 +204,10 @@ import_psks(SrcFile) ->
 import_psks(Io, Delimiter, ChunkSize, NChunk) ->
     case get_psks(Io, Delimiter, ChunkSize) of
         {ok, Entries} ->
-            _ = trans(fun insert_psks/1, [Entries]),
+            _ = trans(fun ?MODULE:insert_psks/1, [Entries]),
             import_psks(Io, Delimiter, ChunkSize, NChunk + 1);
         {eof, Entries} ->
-            _ = trans(fun insert_psks/1, [Entries]),
+            _ = trans(fun ?MODULE:insert_psks/1, [Entries]),
             ok;
         {error, {bad_format, {line, N}}} ->
             {error, {bad_format, {line, NChunk * ChunkSize + N}}};
@@ -214,9 +237,12 @@ get_psks(Io, Delimiter, Remaining, Acc) ->
     end.
 
 insert_psks(Entries) ->
-    lists:foreach(fun(Entry) ->
-                      insert_psk(Entry)
-                  end, Entries).
+    lists:foreach(
+        fun(Entry) ->
+            insert_psk(Entry)
+        end,
+        Entries
+    ).
 
 insert_psk({PSKIdentity, SharedSecret}) ->
     mnesia:write(?TAB, #psk_entry{psk_id = PSKIdentity, shared_secret = SharedSecret}, write).
@@ -229,7 +255,8 @@ trim_crlf(Bin) ->
                 ?CR -> binary:part(Bin, 0, Size - 2);
                 _ -> binary:part(Bin, 0, Size - 1)
             end;
-        _ -> Bin
+        _ ->
+            Bin
     end.
 
 trans(Fun, Args) ->

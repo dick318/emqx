@@ -18,23 +18,31 @@
 
 -behaviour(application).
 
--export([ start/2
-        , stop/1
-        ]).
+-export([
+    start/2,
+    stop/1
+]).
 
 -include("emqx_dashboard.hrl").
 
 start(_StartType, _StartArgs) ->
-    {ok, Sup} = emqx_dashboard_sup:start_link(),
     ok = mria_rlog:wait_for_shards([?DASHBOARD_SHARD], infinity),
+    {ok, Sup} = emqx_dashboard_sup:start_link(),
     case emqx_dashboard:start_listeners() of
         ok ->
             emqx_dashboard_cli:load(),
-            {ok, _Result} = emqx_dashboard_admin:add_default_user(),
-            {ok, Sup};
-        {error, Reason} -> {error, Reason}
+            case emqx_dashboard_admin:add_bootstrap_users() of
+                ok ->
+                    {ok, _} = emqx_dashboard_admin:add_default_user(),
+                    {ok, Sup};
+                Error ->
+                    Error
+            end;
+        {error, Reason} ->
+            {error, Reason}
     end.
 
 stop(_State) ->
+    ok = emqx_dashboard:stop_listeners(),
     emqx_dashboard_cli:unload(),
-    emqx_dashboard:stop_listeners().
+    ok.

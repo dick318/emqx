@@ -19,44 +19,46 @@
 -behaviour(minirest_api).
 
 -include_lib("typerefl/include/types.hrl").
+-include_lib("hocon/include/hoconsc.hrl").
 -include("emqx_modules.hrl").
 
 -import(hoconsc, [mk/2, ref/1, ref/2]).
 
--define(MAX_PAYLOAD_LENGTH, 2048).
--define(PAYLOAD_TOO_LARGE, 'PAYLOAD_TOO_LARGE').
+-export([
+    status/2,
+    delayed_messages/2,
+    delayed_message/2
+]).
 
--export([ status/2
-        , delayed_messages/2
-        , delayed_message/2
-        ]).
-
--export([ paths/0
-        , fields/1
-        , schema/1]).
+-export([
+    paths/0,
+    fields/1,
+    schema/1
+]).
 
 %% for rpc
 -export([update_config_/1]).
 
 -export([api_spec/0]).
 
--define(ALREADY_ENABLED, 'ALREADY_ENABLED').
--define(ALREADY_DISABLED, 'ALREADY_DISABLED').
+-define(MAX_PAYLOAD_LENGTH, 2048).
+-define(PAYLOAD_TOO_LARGE, <<"PAYLOAD_TOO_LARGE">>).
 
 -define(INTERNAL_ERROR, 'INTERNAL_ERROR').
 -define(BAD_REQUEST, 'BAD_REQUEST').
 
 -define(MESSAGE_ID_NOT_FOUND, 'MESSAGE_ID_NOT_FOUND').
 -define(MESSAGE_ID_SCHEMA_ERROR, 'MESSAGE_ID_SCHEMA_ERROR').
--define(MAX_PAYLOAD_SIZE, 1048576). %% 1MB = 1024 x 1024
+-define(INVALID_NODE, 'INVALID_NODE').
 
 api_spec() ->
     emqx_dashboard_swagger:spec(?MODULE).
 
 paths() ->
-    [ "/mqtt/delayed"
-    , "/mqtt/delayed/messages"
-    , "/mqtt/delayed/messages/:msgid"
+    [
+        "/mqtt/delayed",
+        "/mqtt/delayed/messages",
+        "/mqtt/delayed/messages/:node/:msgid"
     ].
 
 schema("/mqtt/delayed") ->
@@ -64,49 +66,74 @@ schema("/mqtt/delayed") ->
         'operationId' => status,
         get => #{
             tags => ?API_TAG_MQTT,
-            description => <<"Get delayed status">>,
-            summary => <<"Get delayed status">>,
+            description => ?DESC(view_status_api),
             responses => #{
                 200 => ref(emqx_modules_schema, "delayed")
             }
         },
         put => #{
             tags => ?API_TAG_MQTT,
-            description => <<"Enable or disable delayed, set max delayed messages">>,
+            description => ?DESC(update_api),
             'requestBody' => ref(emqx_modules_schema, "delayed"),
             responses => #{
-                200 => mk(ref(emqx_modules_schema, "delayed"),
-                    #{desc => <<"Enable or disable delayed successfully">>}),
-                400 => emqx_dashboard_swagger:error_codes( [?BAD_REQUEST]
-                                                         , <<"Max limit illegality">>)
+                200 => mk(
+                    ref(emqx_modules_schema, "delayed"),
+                    #{desc => ?DESC(update_success)}
+                ),
+                400 => emqx_dashboard_swagger:error_codes(
+                    [?BAD_REQUEST],
+                    ?DESC(illegality_limit)
+                )
             }
         }
     };
-
-schema("/mqtt/delayed/messages/:msgid") ->
-    #{'operationId' => delayed_message,
+schema("/mqtt/delayed/messages/:node/:msgid") ->
+    #{
+        'operationId' => delayed_message,
         get => #{
             tags => ?API_TAG_MQTT,
-            description => <<"Get delayed message">>,
-            parameters => [{msgid, mk(binary(), #{in => path, desc => <<"delay message ID">>})}],
+            description => ?DESC(get_message_api),
+            parameters => [
+                {node,
+                    mk(
+                        binary(),
+                        #{in => path, desc => ?DESC(node)}
+                    )},
+                {msgid, mk(binary(), #{in => path, desc => ?DESC(msgid)})}
+            ],
             responses => #{
                 200 => ref("message_without_payload"),
-                400 => emqx_dashboard_swagger:error_codes( [?MESSAGE_ID_SCHEMA_ERROR]
-                                                         , <<"Bad MsgId format">>),
-                404 => emqx_dashboard_swagger:error_codes( [?MESSAGE_ID_NOT_FOUND]
-                                                         , <<"MsgId not found">>)
+                400 => emqx_dashboard_swagger:error_codes(
+                    [?MESSAGE_ID_SCHEMA_ERROR, ?INVALID_NODE],
+                    ?DESC(bad_msgid_format)
+                ),
+                404 => emqx_dashboard_swagger:error_codes(
+                    [?MESSAGE_ID_NOT_FOUND],
+                    ?DESC(msgid_not_found)
+                )
             }
         },
         delete => #{
             tags => ?API_TAG_MQTT,
-            description => <<"Delete delayed message">>,
-            parameters => [{msgid, mk(binary(), #{in => path, desc => <<"delay message ID">>})}],
+            description => ?DESC(delete_api),
+            parameters => [
+                {node,
+                    mk(
+                        binary(),
+                        #{in => path, desc => ?DESC(node)}
+                    )},
+                {msgid, mk(binary(), #{in => path, desc => ?DESC(msgid)})}
+            ],
             responses => #{
                 204 => <<"Delete delayed message success">>,
-                400 => emqx_dashboard_swagger:error_codes( [?MESSAGE_ID_SCHEMA_ERROR]
-                                                         , <<"Bad MsgId format">>),
-                404 => emqx_dashboard_swagger:error_codes( [?MESSAGE_ID_NOT_FOUND]
-                                                         , <<"MsgId not found">>)
+                400 => emqx_dashboard_swagger:error_codes(
+                    [?MESSAGE_ID_SCHEMA_ERROR, ?INVALID_NODE],
+                    ?DESC(bad_msgid_format)
+                ),
+                404 => emqx_dashboard_swagger:error_codes(
+                    [?MESSAGE_ID_NOT_FOUND],
+                    ?DESC(msgid_not_found)
+                )
             }
         }
     };
@@ -115,78 +142,86 @@ schema("/mqtt/delayed/messages") ->
         'operationId' => delayed_messages,
         get => #{
             tags => ?API_TAG_MQTT,
-            description => <<"List delayed messages">>,
+            description => ?DESC(list_api),
             parameters => [ref(emqx_dashboard_swagger, page), ref(emqx_dashboard_swagger, limit)],
             responses => #{
                 200 =>
-                [
-                    {data, mk(hoconsc:array(ref("message")), #{})},
-                    {meta, [
-                        {page, mk(integer(), #{})},
-                        {limit, mk(integer(), #{})},
-                        {count, mk(integer(), #{})}
-                    ]}
-                ]
+                    [
+                        {data, mk(hoconsc:array(ref("message")), #{})},
+                        {meta, [
+                            {page, mk(pos_integer(), #{desc => ?DESC(view_page)})},
+                            {limit, mk(pos_integer(), #{desc => ?DESC(view_limit)})},
+                            {count, mk(non_neg_integer(), #{desc => ?DESC(count)})}
+                        ]}
+                    ]
             }
         }
     }.
 
 fields("message_without_payload") ->
     [
-        {msgid, mk(integer(), #{desc => <<"Message Id (MQTT message id hash)">>})},
-        {publish_at, mk(binary(), #{desc => <<"Client publish message time, rfc 3339">>})},
-        {delayed_interval, mk(integer(), #{desc => <<"Delayed interval, second">>})},
-        {delayed_remaining, mk(integer(), #{desc => <<"Delayed remaining, second">>})},
-        {expected_at, mk(binary(), #{desc => <<"Expect publish time, rfc 3339">>})},
-        {topic, mk(binary(), #{desc => <<"Topic">>, example => <<"/sys/#">>})},
-        {qos, mk(binary(), #{desc => <<"QoS">>})},
-        {from_clientid, mk(binary(), #{desc => <<"From ClientId">>})},
-        {from_username, mk(binary(), #{desc => <<"From Username">>})}
+        {msgid, mk(integer(), #{desc => ?DESC(msgid)})},
+        {node, mk(binary(), #{desc => ?DESC(node)})},
+        {publish_at, mk(binary(), #{desc => ?DESC(publish_at)})},
+        {delayed_interval, mk(pos_integer(), #{desc => ?DESC(delayed_interval)})},
+        {delayed_remaining, mk(non_neg_integer(), #{desc => ?DESC(delayed_remaining)})},
+        {expected_at, mk(binary(), #{desc => ?DESC(expected_at)})},
+        {topic, mk(binary(), #{desc => ?DESC(topic), example => <<"/sys/#">>})},
+        {qos, mk(emqx_schema:qos(), #{desc => ?DESC(qos)})},
+        {from_clientid, mk(binary(), #{desc => ?DESC(from_clientid)})},
+        {from_username, mk(binary(), #{desc => ?DESC(from_username)})}
     ];
 fields("message") ->
-    PayloadDesc = io_lib:format(
-                    "Payload, base64 encode. Payload will be ~p if length large than ~p",
-        [?PAYLOAD_TOO_LARGE, ?MAX_PAYLOAD_LENGTH]),
     fields("message_without_payload") ++
-    [{payload, mk(binary(), #{desc => iolist_to_binary(PayloadDesc)})}].
+        [{payload, mk(binary(), #{desc => ?DESC(payload)})}].
 
 %%--------------------------------------------------------------------
 %% HTTP API
 %%--------------------------------------------------------------------
 status(get, _Params) ->
     {200, get_status()};
-
 status(put, #{body := Body}) ->
     update_config(Body).
 
 delayed_messages(get, #{query_string := Qs}) ->
-    {200, emqx_delayed:list(Qs)}.
+    {200, emqx_delayed:cluster_list(Qs)}.
 
-delayed_message(get, #{bindings := #{msgid := Id}}) ->
-    case emqx_delayed:get_delayed_message(Id) of
-        {ok, Message} ->
-            Payload = maps:get(payload, Message),
-            case erlang:byte_size(Payload) > ?MAX_PAYLOAD_SIZE of
-                true ->
-                    {200, Message};
-                _ ->
-                    {200, Message#{payload => base64:encode(Payload)}}
-            end;
-        {error, id_schema_error} ->
-            {400, generate_http_code_map(id_schema_error, Id)};
-        {error, not_found} ->
-            {404, generate_http_code_map(not_found, Id)}
-    end;
-delayed_message(delete, #{bindings := #{msgid := Id}}) ->
-    case emqx_delayed:get_delayed_message(Id) of
-        {ok, _Message} ->
-            _ = emqx_delayed:delete_delayed_message(Id),
-            {204};
-        {error, id_schema_error} ->
-            {400, generate_http_code_map(id_schema_error, Id)};
-        {error, not_found} ->
-            {404, generate_http_code_map(not_found, Id)}
-    end.
+delayed_message(get, #{bindings := #{node := NodeBin, msgid := HexId}}) ->
+    MaybeNode = make_maybe(NodeBin, invalid_node, fun erlang:binary_to_existing_atom/1),
+    MaybeId = make_maybe(HexId, id_schema_error, fun emqx_guid:from_hexstr/1),
+    with_maybe(
+        [MaybeNode, MaybeId],
+        fun(Node, Id) ->
+            case emqx_delayed:get_delayed_message(Node, Id) of
+                {ok, Message} ->
+                    Payload = maps:get(payload, Message),
+                    case erlang:byte_size(Payload) > ?MAX_PAYLOAD_LENGTH of
+                        true ->
+                            {200, Message#{payload => ?PAYLOAD_TOO_LARGE}};
+                        _ ->
+                            {200, Message#{payload => base64:encode(Payload)}}
+                    end;
+                {error, not_found} ->
+                    {404, generate_http_code_map(not_found, Id)};
+                {badrpc, _} ->
+                    {400, generate_http_code_map(invalid_node, Id)}
+            end
+        end
+    );
+delayed_message(delete, #{bindings := #{node := NodeBin, msgid := HexId}}) ->
+    MaybeNode = make_maybe(NodeBin, invalid_node, fun erlang:binary_to_atom/1),
+    MaybeId = make_maybe(HexId, id_schema_error, fun emqx_guid:from_hexstr/1),
+    with_maybe(
+        [MaybeNode, MaybeId],
+        fun(Node, Id) ->
+            case emqx_delayed:delete_delayed_message(Node, Id) of
+                ok ->
+                    {204};
+                {error, not_found} ->
+                    {404, generate_http_code_map(not_found, Id)}
+            end
+        end
+    ).
 
 %%--------------------------------------------------------------------
 %% internal function
@@ -224,30 +259,48 @@ generate_max_delayed_messages(Config) ->
 update_config_(Config) ->
     case emqx_delayed:update_config(Config) of
         {ok, #{raw_config := NewDelayed}} ->
-            case maps:get(<<"enable">>, Config, undefined) of
-                undefined ->
-                    ignore;
-                true ->
-                    emqx_delayed:enable();
-                false ->
-                    emqx_delayed:disable()
-            end,
-            case maps:get(<<"max_delayed_messages">>, Config, undefined) of
-                undefined ->
-                    ignore;
-                Max ->
-                    ok = emqx_delayed:set_max_delayed_messages(Max)
-            end,
             {200, NewDelayed};
         {error, Reason} ->
             Message = list_to_binary(
-                          io_lib:format("Update config failed ~p", [Reason])),
+                io_lib:format("Update config failed ~p", [Reason])
+            ),
             {500, ?INTERNAL_ERROR, Message}
     end.
 
 generate_http_code_map(id_schema_error, Id) ->
-    #{code => ?MESSAGE_ID_SCHEMA_ERROR, message =>
-          iolist_to_binary(io_lib:format("Message ID ~p schema error", [Id]))};
+    #{
+        code => ?MESSAGE_ID_SCHEMA_ERROR,
+        message =>
+            iolist_to_binary(io_lib:format("Message ID ~p schema error", [Id]))
+    };
 generate_http_code_map(not_found, Id) ->
-    #{code => ?MESSAGE_ID_NOT_FOUND, message =>
-          iolist_to_binary(io_lib:format("Message ID ~p not found", [Id]))}.
+    #{
+        code => ?MESSAGE_ID_NOT_FOUND,
+        message =>
+            iolist_to_binary(io_lib:format("Message ID ~p not found", [Id]))
+    };
+generate_http_code_map(invalid_node, Node) ->
+    #{
+        code => ?INVALID_NODE,
+        message =>
+            iolist_to_binary(io_lib:format("The node name ~p is invalid", [Node]))
+    }.
+
+make_maybe(X, Error, Fun) ->
+    try Fun(X) of
+        Right ->
+            Right
+    catch
+        _:_ ->
+            {left, X, Error}
+    end.
+
+with_maybe(Maybes, Cont) ->
+    with_maybe(Maybes, Cont, []).
+
+with_maybe([], Cont, Rights) ->
+    erlang:apply(Cont, lists:reverse(Rights));
+with_maybe([{left, X, Error} | _], _Cont, _Rights) ->
+    {400, generate_http_code_map(Error, X)};
+with_maybe([Right | T], Cont, Rights) ->
+    with_maybe(T, Cont, [Right | Rights]).

@@ -10,19 +10,26 @@
 
 -behaviour(emqx_config_handler).
 
--export([pre_config_update/3,
-         post_config_update/5
-        ]).
+-export([
+    pre_config_update/3,
+    post_config_update/5
+]).
 
--export([load/0,
-         check/2,
-         unload/0,
-         read_license/0,
-         read_license/1,
-         update_file/1,
-         update_key/1]).
+-export([
+    load/0,
+    check/2,
+    unload/0,
+    read_license/0,
+    read_license/1,
+    update_key/1
+]).
 
 -define(CONF_KEY_PATH, [license]).
+
+%% Give the license app the highest priority.
+%% We don't define it in the emqx_hooks.hrl becasue that is an opensource code
+%% and can be changed by the communitiy.
+-define(HP_LICENSE, 2000).
 
 %%------------------------------------------------------------------------------
 %% API
@@ -46,22 +53,14 @@ unload() ->
     emqx_conf:remove_handler(?CONF_KEY_PATH),
     emqx_license_cli:unload().
 
--spec update_file(binary() | string()) ->
-    {ok, emqx_config:update_result()} | {error, emqx_config:update_error()}.
-update_file(Filename) when is_binary(Filename); is_list(Filename) ->
-    Result = emqx_conf:update(
-               ?CONF_KEY_PATH,
-               {file, Filename},
-               #{rawconf_with_defaults => true, override_to => local}),
-    handle_config_update_result(Result).
-
 -spec update_key(binary() | string()) ->
     {ok, emqx_config:update_result()} | {error, emqx_config:update_error()}.
 update_key(Value) when is_binary(Value); is_list(Value) ->
     Result = emqx_conf:update(
-               ?CONF_KEY_PATH,
-               {key, Value},
-               #{rawconf_with_defaults => true, override_to => cluster}),
+        ?CONF_KEY_PATH,
+        {key, Value},
+        #{rawconf_with_defaults => true, override_to => cluster}
+    ),
     handle_config_update_result(Result).
 
 %%------------------------------------------------------------------------------
@@ -82,8 +81,10 @@ check(_ConnInfo, AckProps) ->
                     {ok, AckProps}
             end;
         {error, Reason} ->
-            ?SLOG(error, #{msg => "connection_rejected_due_to_license_not_loaded",
-                           reason => Reason}),
+            ?SLOG(error, #{
+                msg => "connection_rejected_due_to_license_not_loaded",
+                reason => Reason
+            }),
             {stop, {error, ?RC_QUOTA_EXCEEDED}}
     end.
 
@@ -98,7 +99,8 @@ post_config_update(_Path, _Cmd, NewConf, _Old, _AppEnvs) ->
     case read_license(NewConf) of
         {ok, License} ->
             {ok, emqx_license_checker:update(License)};
-        {error, _} = Error -> Error
+        {error, _} = Error ->
+            Error
     end.
 
 %%------------------------------------------------------------------------------
@@ -106,44 +108,32 @@ post_config_update(_Path, _Cmd, NewConf, _Old, _AppEnvs) ->
 %%------------------------------------------------------------------------------
 
 add_license_hook() ->
-    ok = emqx_hooks:put('client.connect', {?MODULE, check, []}).
+    ok = emqx_hooks:put('client.connect', {?MODULE, check, []}, ?HP_LICENSE).
 
 del_license_hook() ->
     _ = emqx_hooks:del('client.connect', {?MODULE, check, []}),
     ok.
 
-do_update({file, Filename}, _Conf) ->
-    case file:read_file(Filename) of
-        {ok, Content} ->
-            case emqx_license_parser:parse(Content) of
-                {ok, _License} ->
-                    #{<<"file">> => Filename};
-                {error, Reason} ->
-                    erlang:throw(Reason)
-            end;
-        {error, Reason} ->
-            erlang:throw({invalid_license_file, Reason})
-    end;
-
-do_update({key, Content}, _Conf) when is_binary(Content); is_list(Content) ->
+do_update({key, Content}, Conf) when is_binary(Content); is_list(Content) ->
     case emqx_license_parser:parse(Content) of
         {ok, _License} ->
-            #{<<"key">> => Content};
+            Conf#{<<"key">> => Content};
         {error, Reason} ->
             erlang:throw(Reason)
-    end.
+    end;
+%% We don't do extra action when update license's watermark.
+do_update(_Other, Conf) ->
+    Conf.
 
 check_max_clients_exceeded(MaxClients) ->
     emqx_license_resources:connection_count() > MaxClients * 1.1.
 
-read_license(#{file := Filename}) ->
-    case file:read_file(Filename) of
-        {ok, Content} -> emqx_license_parser:parse(Content);
-        {error, _} = Error -> Error
-    end;
-
 read_license(#{key := Content}) ->
     emqx_license_parser:parse(Content).
 
-handle_config_update_result({error, _} = Error) -> Error;
-handle_config_update_result({ok, #{post_config_update := #{emqx_license := Result}}}) -> {ok, Result}.
+handle_config_update_result({error, {post_config_update, ?MODULE, Error}}) ->
+    {error, Error};
+handle_config_update_result({error, _} = Error) ->
+    Error;
+handle_config_update_result({ok, #{post_config_update := #{emqx_license := Result}}}) ->
+    {ok, Result}.

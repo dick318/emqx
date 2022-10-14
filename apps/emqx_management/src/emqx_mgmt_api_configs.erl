@@ -17,136 +17,293 @@
 -module(emqx_mgmt_api_configs).
 
 -include_lib("hocon/include/hoconsc.hrl").
+-include_lib("emqx/include/logger.hrl").
 -behaviour(minirest_api).
 
--export([api_spec/0]).
+-export([api_spec/0, namespace/0]).
 -export([paths/0, schema/1, fields/1]).
 
--export([config/3, config_reset/3, configs/3, get_full_config/0]).
+-export([
+    config/3,
+    config_reset/3,
+    configs/3,
+    get_full_config/0,
+    global_zone_configs/3
+]).
 
--export([get_conf_schema/2, gen_schema/1]).
+-export([gen_schema/1]).
 
 -define(PREFIX, "/configs/").
 -define(PREFIX_RESET, "/configs_reset/").
 -define(ERR_MSG(MSG), list_to_binary(io_lib:format("~p", [MSG]))).
--define(EXCLUDES, [listeners, node, cluster, gateway, rule_engine]).
+-define(OPTS, #{rawconf_with_defaults => true, override_to => cluster}).
+-define(TAGS, ["Configs"]).
+
+-define(EXCLUDES,
+    [
+        <<"exhook">>,
+        <<"gateway">>,
+        <<"plugins">>,
+        <<"bridges">>,
+        <<"rule_engine">>,
+        <<"authorization">>,
+        <<"authentication">>,
+        <<"rpc">>,
+        <<"db">>,
+        <<"connectors">>,
+        <<"slow_subs">>,
+        <<"psk_authentication">>,
+        <<"topic_metrics">>,
+        <<"rewrite">>,
+        <<"auto_subscribe">>,
+        <<"retainer">>,
+        <<"statsd">>,
+        <<"delayed">>,
+        <<"event_message">>,
+        <<"prometheus">>,
+        <<"telemetry">>,
+        <<"sys_topics">>,
+        <<"limiter">>,
+        <<"listeners">>
+    ] ++ global_zone_roots()
+).
 
 api_spec() ->
-    emqx_dashboard_swagger:spec(?MODULE).
+    emqx_dashboard_swagger:spec(?MODULE, #{check_schema => true}).
+
+namespace() -> "configuration".
 
 paths() ->
-    ["/configs", "/configs_reset/:rootname"] ++
-    lists:map(fun({Name, _Type}) -> ?PREFIX ++ to_list(Name) end, config_list(?EXCLUDES)).
+    [
+        "/configs",
+        "/configs_reset/:rootname",
+        "/configs/global_zone"
+        %%  "/configs/limiter/:limiter_type"
+    ] ++
+        lists:map(fun({Name, _Type}) -> ?PREFIX ++ binary_to_list(Name) end, config_list()).
 
 schema("/configs") ->
     #{
         'operationId' => configs,
         get => #{
-            tags => [conf],
+            tags => ?TAGS,
             description =>
-<<"Get all the configurations of the specified node, including hot and non-hot updatable items.">>,
+                <<"Get all the configurations of the specified node, including hot and non-hot updatable items.">>,
             parameters => [
-                {node, hoconsc:mk(typerefl:atom(),
-                    #{in => query, required => false, example => <<"emqx@127.0.0.1">>,
-                        desc =>
- <<"Node's name: If you do not fill in the fields, this node will be used by default.">>})}],
+                {node,
+                    hoconsc:mk(
+                        typerefl:atom(),
+                        #{
+                            in => query,
+                            required => false,
+                            example => <<"emqx@127.0.0.1">>,
+                            desc =>
+                                <<"Node's name: If you do not fill in the fields, this node will be used by default.">>
+                        }
+                    )}
+            ],
             responses => #{
-                200 => config_list([])
+                200 => lists:map(fun({_, Schema}) -> Schema end, config_list())
             }
         }
     };
 schema("/configs_reset/:rootname") ->
-    Paths = lists:map(fun({Path, _}) -> Path end, config_list(?EXCLUDES)),
+    Paths = lists:map(fun({Path, _}) -> binary_to_atom(Path) end, config_list()),
     #{
         'operationId' => config_reset,
         post => #{
-            tags => [conf],
+            tags => ?TAGS,
             description =>
-<<"Reset the config entry specified by the query string parameter `conf_path`.<br/>
-- For a config entry that has default value, this resets it to the default value;
-- For a config entry that has no default value, an error 400 will be returned">>,
+                <<
+                    "Reset the config entry specified by the query string parameter `conf_path`.</br>\n"
+                    "- For a config entry that has default value, this resets it to the default value;\n"
+                    "- For a config entry that has no default value, an error 400 will be returned"
+                >>,
             %% We only return "200" rather than the new configs that has been changed, as
             %% the schema of the changed configs is depends on the request parameter
             %% `conf_path`, it cannot be defined here.
             parameters => [
-                {rootname, hoconsc:mk( hoconsc:enum(Paths)
-                                     , #{in => path, example => <<"authorization">>})},
-                {conf_path, hoconsc:mk(typerefl:binary(),
-                    #{in => query, required => false, example => <<"cache.enable">>,
-                        desc => <<"The config path separated by '.' character">>})}],
+                {rootname,
+                    hoconsc:mk(
+                        hoconsc:enum(Paths),
+                        #{in => path, example => <<"sysmon">>}
+                    )},
+                {conf_path,
+                    hoconsc:mk(
+                        typerefl:binary(),
+                        #{
+                            in => query,
+                            required => false,
+                            example => <<"os.sysmem_high_watermark">>,
+                            desc => <<"The config path separated by '.' character">>
+                        }
+                    )}
+            ],
             responses => #{
                 200 => <<"Rest config successfully">>,
-                400 => emqx_dashboard_swagger:error_codes(['NO_DEFAULT_VALUE', 'REST_FAILED'])
+                400 => emqx_dashboard_swagger:error_codes(['NO_DEFAULT_VALUE', 'REST_FAILED']),
+                403 => emqx_dashboard_swagger:error_codes(['REST_FAILED'])
             }
         }
     };
+schema("/configs/global_zone") ->
+    Schema = global_zone_schema(),
+    #{
+        'operationId' => global_zone_configs,
+        get => #{
+            tags => ?TAGS,
+            description => <<"Get the global zone configs">>,
+            responses => #{200 => Schema}
+        },
+        put => #{
+            tags => ?TAGS,
+            description => <<"Update globbal zone configs">>,
+            'requestBody' => Schema,
+            responses => #{
+                200 => Schema,
+                400 => emqx_dashboard_swagger:error_codes(['UPDATE_FAILED']),
+                403 => emqx_dashboard_swagger:error_codes(['UPDATE_FAILED'])
+            }
+        }
+    };
+%% schema("/configs/limiter/:limiter_type") ->
+%%     Schema = hoconsc:ref(emqx_limiter_schema, limiter_opts),
+%%     Parameters = [
+%%         {limiter_type,
+%%             hoconsc:mk(
+%%                 hoconsc:enum(emqx_limiter_schema:types()),
+%%                 #{
+%%                     in => path,
+%%                     required => true,
+%%                     example => <<"bytes_in">>,
+%%                     desc => <<"The limiter type">>
+%%                 }
+%%             )}
+%%     ],
+%%     #{
+%%         'operationId' => config,
+%%         get => #{
+%%             tags => ?TAGS,
+%%             description => <<"Get config of this limiter">>,
+%%             parameters => Parameters,
+%%             responses => #{
+%%                 200 => Schema,
+%%                 404 => emqx_dashboard_swagger:error_codes(['NOT_FOUND'], <<"config not found">>)
+%%             }
+%%         },
+%%         put => #{
+%%             tags => ?TAGS,
+%%             description => <<"Update config of this limiter">>,
+%%             parameters => Parameters,
+%%             'requestBody' => Schema,
+%%             responses => #{
+%%                 200 => Schema,
+%%                 400 => emqx_dashboard_swagger:error_codes(['UPDATE_FAILED'])
+%%             }
+%%         }
+%%     };
 schema(Path) ->
-    {Root, Schema} = find_schema(Path),
+    {RootKey, {_Root, Schema}} = find_schema(Path),
     #{
         'operationId' => config,
         get => #{
-            tags => [conf],
-            description => iolist_to_binary([ <<"Get the sub-configurations under *">>
-                                            , Root
-                                            , <<"*">>]),
+            tags => ?TAGS,
+            description => iolist_to_binary([
+                <<"Get the sub-configurations under *">>,
+                RootKey,
+                <<"*">>
+            ]),
             responses => #{
                 200 => Schema,
                 404 => emqx_dashboard_swagger:error_codes(['NOT_FOUND'], <<"config not found">>)
             }
         },
         put => #{
-            tags => [conf],
-            description => iolist_to_binary([ <<"Update the sub-configurations under *">>
-                                            , Root
-                                            , <<"*">>]),
+            tags => ?TAGS,
+            description => iolist_to_binary([
+                <<"Update the sub-configurations under *">>,
+                RootKey,
+                <<"*">>
+            ]),
             'requestBody' => Schema,
             responses => #{
                 200 => Schema,
-                400 => emqx_dashboard_swagger:error_codes(['UPDATE_FAILED'])
+                400 => emqx_dashboard_swagger:error_codes(['UPDATE_FAILED']),
+                403 => emqx_dashboard_swagger:error_codes(['UPDATE_FAILED'])
             }
         }
     }.
 
 find_schema(Path) ->
     [_, _Prefix, Root | _] = string:split(Path, "/", all),
-    Configs = config_list(?EXCLUDES),
-    case lists:keyfind(Root, 1, Configs) of
-        {Root, Schema} -> {Root, Schema};
-        false ->
-            RootAtom = list_to_existing_atom(Root),
-            {Root, element(2, lists:keyfind(RootAtom, 1, Configs))}
-    end.
+    Configs = config_list(),
+    lists:keyfind(list_to_binary(Root), 1, Configs).
 
-%% we load all configs from emqx_conf_schema, some of them are defined as local ref
-%% we need redirect to emqx_conf_schema.
-%% such as hoconsc:ref("node") to hoconsc:ref(emqx_conf_schema, "node")
-fields(Field) -> emqx_conf_schema:fields(Field).
+%% we load all configs from emqx_*_schema, some of them are defined as local ref
+%% we need redirect to emqx_*_schema.
+%% such as hoconsc:ref("node") to hoconsc:ref(emqx_*_schema, "node")
+fields(Field) ->
+    Mod = emqx_conf:schema_module(),
+    apply(Mod, fields, [Field]).
 
 %%%==============================================================================================
 %% HTTP API Callbacks
 config(get, _Params, Req) ->
     Path = conf_path(Req),
-    case emqx_map_lib:deep_find(Path, get_full_config()) of
-        {ok, Conf} ->
-            {200, Conf};
-        {not_found, _, _} ->
-            {404, #{code => 'NOT_FOUND', message => <<"Config cannot found">>}}
-    end;
-
+    {ok, Conf} = emqx_map_lib:deep_find(Path, get_full_config()),
+    {200, Conf};
 config(put, #{body := Body}, Req) ->
     Path = conf_path(Req),
-    case emqx:update_config(Path, Body, #{rawconf_with_defaults => true}) of
+    case emqx_conf:update(Path, Body, ?OPTS) of
         {ok, #{raw_config := RawConf}} ->
-            {200, emqx_map_lib:jsonable_map(RawConf)};
+            {200, RawConf};
+        {error, {permission_denied, Reason}} ->
+            {403, #{code => 'UPDATE_FAILED', message => Reason}};
         {error, Reason} ->
             {400, #{code => 'UPDATE_FAILED', message => ?ERR_MSG(Reason)}}
+    end.
+
+global_zone_configs(get, _Params, _Req) ->
+    Paths = global_zone_roots(),
+    Zones = lists:foldl(
+        fun(Path, Acc) -> Acc#{Path => get_config_with_default([Path])} end,
+        #{},
+        Paths
+    ),
+    {200, Zones};
+global_zone_configs(put, #{body := Body}, _Req) ->
+    Res =
+        maps:fold(
+            fun(Path, Value, Acc) ->
+                case emqx_conf:update([Path], Value, ?OPTS) of
+                    {ok, #{raw_config := RawConf}} ->
+                        Acc#{Path => RawConf};
+                    {error, Reason} ->
+                        ?SLOG(error, #{
+                            msg => "update global zone failed",
+                            reason => Reason,
+                            path => Path,
+                            value => Value
+                        }),
+                        Acc
+                end
+            end,
+            #{},
+            Body
+        ),
+    case maps:size(Res) =:= maps:size(Body) of
+        true -> {200, Res};
+        false -> {400, #{code => 'UPDATE_FAILED'}}
     end.
 
 config_reset(post, _Params, Req) ->
     %% reset the config specified by the query string param 'conf_path'
     Path = conf_path_reset(Req) ++ conf_path_from_querystr(Req),
-    case emqx:reset_config(Path, #{}) of
-        {ok, _} -> {200};
+    case emqx_conf:reset(Path, ?OPTS) of
+        {ok, _} ->
+            {200};
+        {error, {permission_denied, Reason}} ->
+            {403, #{code => 'REST_FAILED', message => Reason}};
         {error, no_default_value} ->
             {400, #{code => 'NO_DEFAULT_VALUE', message => <<"No Default Value.">>}};
         {error, Reason} ->
@@ -156,9 +313,8 @@ config_reset(post, _Params, Req) ->
 configs(get, Params, _Req) ->
     Node = maps:get(node, Params, node()),
     case
-        lists:member(Node, mria_mnesia:running_nodes())
-        andalso
-        emqx_management_proto_v1:get_full_config(Node)
+        lists:member(Node, mria_mnesia:running_nodes()) andalso
+            emqx_management_proto_v2:get_full_config(Node)
     of
         false ->
             Message = list_to_binary(io_lib:format("Bad node ~p, reason not found", [Node])),
@@ -175,8 +331,16 @@ conf_path_reset(Req) ->
     string:lexemes(Path, "/ ").
 
 get_full_config() ->
-    emqx_map_lib:jsonable_map(
-        emqx_config:fill_defaults(emqx:get_raw_config([]))).
+    emqx_config:fill_defaults(
+        maps:without(
+            ?EXCLUDES,
+            emqx:get_raw_config([])
+        ),
+        #{obfuscate_sensitive_values => true}
+    ).
+
+get_config_with_default(Path) ->
+    emqx_config:fill_defaults(emqx:get_raw_config(Path)).
 
 conf_path_from_querystr(Req) ->
     case proplists:get_value(<<"conf_path">>, cowboy_req:parse_qs(Req)) of
@@ -184,32 +348,14 @@ conf_path_from_querystr(Req) ->
         Path -> string:lexemes(Path, ". ")
     end.
 
-config_list(Exclude) ->
-    Roots = emqx_conf_schema:roots(),
-    lists:foldl(fun(Key, Acc) -> lists:delete(Key, Acc) end, Roots, Exclude).
-
-to_list(L) when is_list(L) -> L;
-to_list(Atom) when is_atom(Atom) -> atom_to_list(Atom).
+config_list() ->
+    Mod = emqx_conf:schema_module(),
+    Roots = hocon_schema:roots(Mod),
+    lists:foldl(fun(Key, Acc) -> lists:keydelete(Key, 1, Acc) end, Roots, ?EXCLUDES).
 
 conf_path(Req) ->
     <<"/api/v5", ?PREFIX, Path/binary>> = cowboy_req:path(Req),
     string:lexemes(Path, "/ ").
-
-get_conf_schema(Conf, MaxDepth) ->
-    get_conf_schema([], maps:to_list(Conf), [], MaxDepth).
-
-get_conf_schema(_BasePath, [], Result, _MaxDepth) ->
-    Result;
-get_conf_schema(BasePath, [{Key, Conf} | Confs], Result, MaxDepth) ->
-    Path = BasePath ++ [Key],
-    Depth = length(Path),
-    Result1 = case is_map(Conf) of
-                  true when Depth < MaxDepth ->
-                      get_conf_schema(Path, maps:to_list(Conf), Result, MaxDepth);
-                  true when Depth >= MaxDepth -> Result;
-                  false -> Result
-              end,
-    get_conf_schema(BasePath, Confs, [{Path, gen_schema(Conf)} | Result1], MaxDepth).
 
 %% TODO: generate from hocon schema
 gen_schema(Conf) when is_boolean(Conf) ->
@@ -226,8 +372,11 @@ gen_schema(Conf) when is_list(Conf) ->
             #{type => array, items => gen_schema(hd(Conf))}
     end;
 gen_schema(Conf) when is_map(Conf) ->
-    #{type => object, properties =>
-    maps:map(fun(_K, V) -> gen_schema(V) end, Conf)};
+    #{
+        type => object,
+        properties =>
+            maps:map(fun(_K, V) -> gen_schema(V) end, Conf)
+    };
 gen_schema(_Conf) ->
     %% the conf is not of JSON supported type, it may have been converted
     %% by the hocon schema
@@ -235,3 +384,10 @@ gen_schema(_Conf) ->
 
 with_default_value(Type, Value) ->
     Type#{example => emqx_map_lib:binary_string(Value)}.
+
+global_zone_roots() ->
+    lists:map(fun({K, _}) -> K end, global_zone_schema()).
+
+global_zone_schema() ->
+    Roots = hocon_schema:roots(emqx_zone_schema),
+    lists:map(fun({RootKey, {_Root, Schema}}) -> {RootKey, Schema} end, Roots).

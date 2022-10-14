@@ -16,6 +16,7 @@
 
 -module(emqx_mgmt_api_banned).
 
+-include_lib("hocon/include/hoconsc.hrl").
 -include_lib("emqx/include/emqx.hrl").
 -include_lib("typerefl/include/types.hrl").
 
@@ -23,18 +24,22 @@
 
 -behaviour(minirest_api).
 
--export([ api_spec/0
-        , paths/0
-        , schema/1
-        , fields/1]).
+-export([
+    api_spec/0,
+    paths/0,
+    schema/1,
+    fields/1
+]).
 
 -export([format/1]).
 
--export([ banned/2
-        , delete_banned/2
-        ]).
+-export([
+    banned/2,
+    delete_banned/2
+]).
 
 -define(TAB, emqx_banned).
+-define(TAGS, [<<"Banned">>]).
 
 -define(BANNED_TYPES, [clientid, username, peerhost]).
 
@@ -48,27 +53,31 @@ paths() ->
 
 schema("/banned") ->
     #{
-        'operationId' =>  banned,
+        'operationId' => banned,
         get => #{
-            description => <<"List banned">>,
+            description => ?DESC(list_banned_api),
+            tags => ?TAGS,
             parameters => [
                 hoconsc:ref(emqx_dashboard_swagger, page),
                 hoconsc:ref(emqx_dashboard_swagger, limit)
             ],
             responses => #{
-                200 =>[
+                200 => [
                     {data, hoconsc:mk(hoconsc:array(hoconsc:ref(ban)), #{})},
-                    {meta, hoconsc:mk(hoconsc:ref(meta), #{})}
+                    {meta, hoconsc:mk(hoconsc:ref(emqx_dashboard_swagger, meta), #{})}
                 ]
             }
         },
         post => #{
-            description => <<"Create banned">>,
+            description => ?DESC(create_banned_api),
+            tags => ?TAGS,
             'requestBody' => hoconsc:mk(hoconsc:ref(ban)),
             responses => #{
                 200 => [{data, hoconsc:mk(hoconsc:array(hoconsc:ref(ban)), #{})}],
-                400 => emqx_dashboard_swagger:error_codes(['ALREADY_EXISTED'],
-                                                          <<"Banned already existed">>)
+                400 => emqx_dashboard_swagger:error_codes(
+                    ['ALREADY_EXISTS', 'BAD_REQUEST'],
+                    ?DESC(create_banned_api_response400)
+                )
             }
         }
     };
@@ -76,57 +85,73 @@ schema("/banned/:as/:who") ->
     #{
         'operationId' => delete_banned,
         delete => #{
-            description => <<"Delete banned">>,
+            description => ?DESC(delete_banned_api),
+            tags => ?TAGS,
             parameters => [
-                {as, hoconsc:mk(hoconsc:enum(?BANNED_TYPES), #{
-                    desc => <<"Banned type">>,
-                    in => path,
-                    example => username})},
-                {who, hoconsc:mk(binary(), #{
-                    desc => <<"Client info as banned type">>,
-                    in => path,
-                    example => <<"Badass">>})}
-                ],
+                {as,
+                    hoconsc:mk(hoconsc:enum(?BANNED_TYPES), #{
+                        desc => ?DESC(as),
+                        required => true,
+                        in => path,
+                        example => username
+                    })},
+                {who,
+                    hoconsc:mk(binary(), #{
+                        desc => ?DESC(who),
+                        required => true,
+                        in => path,
+                        example => <<"Badass">>
+                    })}
+            ],
             responses => #{
                 204 => <<"Delete banned success">>,
-                404 => emqx_dashboard_swagger:error_codes(['RESOURCE_NOT_FOUND'],
-                                                          <<"Banned not found">>)
+                404 => emqx_dashboard_swagger:error_codes(
+                    ['NOT_FOUND'],
+                    ?DESC(delete_banned_api_response404)
+                )
             }
         }
     }.
 
 fields(ban) ->
     [
-        {as, hoconsc:mk(hoconsc:enum(?BANNED_TYPES), #{
-            desc => <<"Banned type clientid, username, peerhost">>,
-            nullable => false,
-            example => username})},
-        {who, hoconsc:mk(binary(), #{
-            desc => <<"Client info as banned type">>,
-            nullable => false,
-            example => <<"Badass坏"/utf8>>})},
-        {by, hoconsc:mk(binary(), #{
-            desc => <<"Commander">>,
-            nullable => true,
-            example => <<"mgmt_api">>})},
-        {reason, hoconsc:mk(binary(), #{
-            desc => <<"Banned reason">>,
-            nullable => true,
-            example => <<"Too many requests">>})},
-        {at, hoconsc:mk(emqx_schema:rfc3339_system_time(), #{
-            desc => <<"Create banned time, rfc3339, now if not specified">>,
-            nullable => true,
-            example => <<"2021-10-25T21:48:47+08:00">>})},
-        {until, hoconsc:mk(emqx_schema:rfc3339_system_time(), #{
-            desc => <<"Cancel banned time, rfc3339, now + 5 minute if not specified">>,
-            nullable => true,
-            example => <<"2021-10-25T21:53:47+08:00">>})
-        }
-    ];
-fields(meta) ->
-    emqx_dashboard_swagger:fields(page) ++
-        emqx_dashboard_swagger:fields(limit) ++
-        [{count, hoconsc:mk(integer(), #{example => 1})}].
+        {as,
+            hoconsc:mk(hoconsc:enum(?BANNED_TYPES), #{
+                desc => ?DESC(as),
+                required => true,
+                example => username
+            })},
+        {who,
+            hoconsc:mk(binary(), #{
+                desc => ?DESC(who),
+                required => true,
+                example => <<"Banned name"/utf8>>
+            })},
+        {by,
+            hoconsc:mk(binary(), #{
+                desc => ?DESC(by),
+                required => false,
+                example => <<"mgmt_api">>
+            })},
+        {reason,
+            hoconsc:mk(binary(), #{
+                desc => ?DESC(reason),
+                required => false,
+                example => <<"Too many requests">>
+            })},
+        {at,
+            hoconsc:mk(emqx_datetime:epoch_second(), #{
+                desc => ?DESC(at),
+                required => false,
+                example => <<"2021-10-25T21:48:47+08:00">>
+            })},
+        {until,
+            hoconsc:mk(emqx_datetime:epoch_second(), #{
+                desc => ?DESC(until),
+                required => false,
+                example => <<"2021-10-25T21:53:47+08:00">>
+            })}
+    ].
 
 banned(get, #{query_string := Params}) ->
     Response = emqx_mgmt_api:paginate(?TAB, Params, ?FORMAT_FUN),
@@ -134,12 +159,14 @@ banned(get, #{query_string := Params}) ->
 banned(post, #{body := Body}) ->
     case emqx_banned:parse(Body) of
         {error, Reason} ->
-            {400, #{code => 'PARAMS_ERROR', message => list_to_binary(Reason)}};
+            {400, 'BAD_REQUEST', list_to_binary(Reason)};
         Ban ->
             case emqx_banned:create(Ban) of
-                {ok, Banned} -> {200, format(Banned)};
+                {ok, Banned} ->
+                    {200, format(Banned)};
                 {error, {already_exist, Old}} ->
-                    {400, #{code => 'ALREADY_EXISTED', message => format(Old)}}
+                    OldBannedFormat = emqx_json:encode(format(Old)),
+                    {400, 'ALREADY_EXISTS', OldBannedFormat}
             end
     end.
 
@@ -148,7 +175,7 @@ delete_banned(delete, #{bindings := Params}) ->
         [] ->
             #{as := As0, who := Who0} = Params,
             Message = list_to_binary(io_lib:format("~p: ~s not found", [As0, Who0])),
-            {404, #{code => 'RESOURCE_NOT_FOUND', message => Message}};
+            {404, 'NOT_FOUND', Message};
         _ ->
             ok = emqx_banned:delete(Params),
             {204}

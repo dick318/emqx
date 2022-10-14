@@ -16,45 +16,55 @@
 
 -module(emqx_statsd_schema).
 
+-include_lib("hocon/include/hoconsc.hrl").
 -include_lib("typerefl/include/types.hrl").
 
 -behaviour(hocon_schema).
 
--export([to_ip_port/1]).
-
--export([ namespace/0
-        , roots/0
-        , fields/1]).
-
--typerefl_from_string({ip_port/0, emqx_statsd_schema, to_ip_port}).
+-export([
+    namespace/0,
+    roots/0,
+    fields/1,
+    desc/1
+]).
 
 namespace() -> "statsd".
 
 roots() -> ["statsd"].
 
 fields("statsd") ->
-    [ {enable, hoconsc:mk(boolean(), #{default => false, nullable => false})}
-    , {server, fun server/1}
-    , {sample_time_interval, fun duration_ms/1}
-    , {flush_time_interval, fun duration_ms/1}
+    [
+        {enable,
+            hoconsc:mk(
+                boolean(),
+                #{
+                    default => false,
+                    required => true,
+                    desc => ?DESC(enable)
+                }
+            )},
+        {server, fun server/1},
+        {sample_time_interval, fun sample_interval/1},
+        {flush_time_interval, fun flush_interval/1}
     ].
 
-server(type) -> emqx_schema:ip_port();
-server(nullable) -> false;
+desc("statsd") -> ?DESC(statsd);
+desc(_) -> undefined.
+
+server(type) -> emqx_schema:host_port();
+server(required) -> true;
 server(default) -> "127.0.0.1:8125";
+server(desc) -> ?DESC(?FUNCTION_NAME);
 server(_) -> undefined.
 
-duration_ms(type) -> emqx_schema:duration_ms();
-duration_ms(nullable) -> false;
-duration_ms(default) -> "10s";
-duration_ms(_) -> undefined.
+sample_interval(type) -> emqx_schema:duration_ms();
+sample_interval(required) -> true;
+sample_interval(default) -> "10s";
+sample_interval(desc) -> ?DESC(?FUNCTION_NAME);
+sample_interval(_) -> undefined.
 
-to_ip_port(Str) ->
-     case string:tokens(Str, ":") of
-         [Ip, Port] ->
-             case inet:parse_address(Ip) of
-                 {ok, R} -> {ok, {R, list_to_integer(Port)}};
-                 _ -> {error, Str}
-             end;
-         _ -> {error, Str}
-     end.
+flush_interval(type) -> emqx_schema:duration_ms();
+flush_interval(required) -> true;
+flush_interval(default) -> "10s";
+flush_interval(desc) -> ?DESC(?FUNCTION_NAME);
+flush_interval(_) -> undefined.

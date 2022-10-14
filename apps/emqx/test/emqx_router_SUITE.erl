@@ -21,17 +21,27 @@
 
 -include_lib("emqx/include/emqx.hrl").
 -include_lib("eunit/include/eunit.hrl").
+-include_lib("common_test/include/ct.hrl").
 
 -define(R, emqx_router).
 
 all() -> emqx_common_test_helpers:all(?MODULE).
 
 init_per_suite(Config) ->
+    PrevBootModules = application:get_env(emqx, boot_modules),
     emqx_common_test_helpers:boot_modules([router]),
     emqx_common_test_helpers:start_apps([]),
-    Config.
+    [
+        {prev_boot_modules, PrevBootModules}
+        | Config
+    ].
 
-end_per_suite(_Config) ->
+end_per_suite(Config) ->
+    PrevBootModules = ?config(prev_boot_modules, Config),
+    case PrevBootModules of
+        undefined -> ok;
+        {ok, Mods} -> emqx_common_test_helpers:boot_modules(Mods)
+    end,
     emqx_common_test_helpers:stop_apps([]).
 
 init_per_testcase(_TestCase, Config) ->
@@ -83,11 +93,15 @@ t_match_routes(_) ->
     ?R:add_route(<<"a/+/c">>, node()),
     ?R:add_route(<<"a/b/#">>, node()),
     ?R:add_route(<<"#">>, node()),
-    ?assertEqual([#route{topic = <<"#">>, dest = node()},
-                  #route{topic = <<"a/+/c">>, dest = node()},
-                  #route{topic = <<"a/b/#">>, dest = node()},
-                  #route{topic = <<"a/b/c">>, dest = node()}],
-                 lists:sort(?R:match_routes(<<"a/b/c">>))),
+    ?assertEqual(
+        [
+            #route{topic = <<"#">>, dest = node()},
+            #route{topic = <<"a/+/c">>, dest = node()},
+            #route{topic = <<"a/b/#">>, dest = node()},
+            #route{topic = <<"a/b/c">>, dest = node()}
+        ],
+        lists:sort(?R:match_routes(<<"a/b/c">>))
+    ),
     ?R:delete_route(<<"a/b/c">>, node()),
     ?R:delete_route(<<"a/+/c">>, node()),
     ?R:delete_route(<<"a/b/#">>, node()),
@@ -111,5 +125,7 @@ t_unexpected(_) ->
     Router ! bad_info.
 
 clear_tables() ->
-    lists:foreach(fun mnesia:clear_table/1,
-                  [emqx_route, emqx_trie, emqx_trie_node]).
+    lists:foreach(
+        fun mnesia:clear_table/1,
+        [emqx_route, emqx_trie, emqx_trie_node]
+    ).

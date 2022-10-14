@@ -7,17 +7,16 @@
 -compile(nowarn_export_all).
 -compile(export_all).
 
--define(DEFAULT_LICENSE_VALUES,
-        ["220111",
-         "0",
-         "10",
-         "Foo",
-         "contact@foo.com",
-         "20220111",
-         "100000",
-         "10"]).
-
--define(DEFAULT_LICENSE_FILE, "emqx.lic").
+-define(DEFAULT_LICENSE_VALUES, [
+    "220111",
+    "0",
+    "10",
+    "Foo",
+    "contact@foo.com",
+    "20220111",
+    "100000",
+    "10"
+]).
 
 private_key() ->
     test_key("pvt.key").
@@ -25,17 +24,50 @@ private_key() ->
 public_key() ->
     test_key("pub.pem").
 
-public_key_encoded() ->
-    public_key:der_encode('RSAPublicKey', public_key()).
+public_key_pem() ->
+    test_key("pub.pem", pem).
 
 test_key(Filename) ->
+    test_key(Filename, decoded).
+
+test_key(Filename, Format) ->
     Dir = code:lib_dir(emqx_license, test),
     Path = filename:join([Dir, "data", Filename]),
     {ok, KeyData} = file:read_file(Path),
-    [PemEntry] = public_key:pem_decode(KeyData),
-    Key = public_key:pem_entry_decode(PemEntry),
-    Key.
+    case Format of
+        pem ->
+            KeyData;
+        decoded ->
+            [PemEntry] = public_key:pem_decode(KeyData),
+            public_key:pem_entry_decode(PemEntry)
+    end.
 
+make_license(Values0 = #{}) ->
+    Defaults = #{
+        license_format => "220111",
+        license_type => "0",
+        customer_type => "10",
+        name => "Foo",
+        email => "contact@foo.com",
+        deployment => "bar-deployment",
+        start_date => "20220111",
+        days => "100000",
+        max_connections => "10"
+    },
+    Values1 = maps:merge(Defaults, Values0),
+    Keys = [
+        license_format,
+        license_type,
+        customer_type,
+        name,
+        email,
+        deployment,
+        start_date,
+        days,
+        max_connections
+    ],
+    Values = lists:map(fun(K) -> maps:get(K, Values1) end, Keys),
+    make_license(Values);
 make_license(Values) ->
     Key = private_key(),
     Text = string:join(Values, "\n"),
@@ -45,6 +77,4 @@ make_license(Values) ->
     iolist_to_binary([EncodedText, ".", EncodedSignature]).
 
 default_license() ->
-    License = make_license(?DEFAULT_LICENSE_VALUES),
-    ok = file:write_file(?DEFAULT_LICENSE_FILE, License),
-    ?DEFAULT_LICENSE_FILE.
+    emqx_license_schema:default_license().

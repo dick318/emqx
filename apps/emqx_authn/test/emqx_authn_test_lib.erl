@@ -26,26 +26,29 @@ authenticator_example(Id) ->
     Example.
 
 http_example() ->
-    authenticator_example('password-based:http').
+    authenticator_example('password_based:http').
 
 built_in_database_example() ->
-    authenticator_example('password-based:built-in-database').
+    authenticator_example('password_based:built_in_database').
 
 jwt_example() ->
     authenticator_example(jwt).
 
 delete_authenticators(Path, Chain) ->
     case emqx_authentication:list_authenticators(Chain) of
-        {error, _} -> ok;
+        {error, _} ->
+            ok;
         {ok, Authenticators} ->
             lists:foreach(
                 fun(#{id := ID}) ->
                     emqx:update_config(
                         Path,
                         {delete_authenticator, Chain, ID},
-                        #{rawconf_with_defaults => true})
+                        #{rawconf_with_defaults => true}
+                    )
                 end,
-                Authenticators)
+                Authenticators
+            )
     end.
 
 delete_config(ID) ->
@@ -53,10 +56,13 @@ delete_config(ID) ->
         emqx:update_config(
             [authentication],
             {delete_authenticator, ?GLOBAL, ID},
-            #{rawconf_with_defaults => false}).
+            #{rawconf_with_defaults => false}
+        ).
 
 client_ssl_cert_opts() ->
     Dir = code:lib_dir(emqx_authn, test),
-    #{keyfile    => filename:join([Dir, "data/certs", "client.key"]),
-      certfile   => filename:join([Dir, "data/certs", "client.crt"]),
-      cacertfile => filename:join([Dir, "data/certs", "ca.crt"])}.
+    #{
+        <<"keyfile">> => filename:join([Dir, <<"data/certs">>, <<"client.key">>]),
+        <<"certfile">> => filename:join([Dir, <<"data/certs">>, <<"client.crt">>]),
+        <<"cacertfile">> => filename:join([Dir, <<"data/certs">>, <<"ca.crt">>])
+    }.

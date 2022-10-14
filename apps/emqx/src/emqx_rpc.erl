@@ -19,47 +19,55 @@
 %% Note: please don't forget to add new API functions to
 %% `emqx_bpapi_trans:extract_mfa'
 
--export([ call/4
-        , call/5
-        , cast/4
-        , cast/5
-        , multicall/4
-        , multicall/5
+-export([
+    call/4,
+    call/5,
+    call/6,
+    cast/4,
+    cast/5,
+    multicall/4,
+    multicall/5,
 
-        , unwrap_erpc/1
-        ]).
+    unwrap_erpc/1
+]).
 
--export_type([ badrpc/0
-             , call_result/0
-             , cast_result/0
-             , multicall_result/1
-             , multicall_result/0
-             , erpc/1
-             , erpc_multicall/1
-             ]).
+-export_type([
+    badrpc/0,
+    call_result/0,
+    cast_result/0,
+    multicall_result/1,
+    multicall_result/0,
+    erpc/1,
+    erpc_multicall/1
+]).
 
--compile({inline,
-          [ rpc_node/1
-          , rpc_nodes/1
-          ]}).
+-compile(
+    {inline, [
+        rpc_node/1,
+        rpc_nodes/1
+    ]}
+).
 
--define(DefaultClientNum, 1).
+-define(DefaultClientNum, 10).
 
--type badrpc() ::  {badrpc, term()} | {badtcp, term()}.
+-type badrpc() :: {badrpc, term()} | {badtcp, term()}.
 
--type call_result() :: term() | badrpc().
+-type call_result(Result) :: Result | badrpc().
+
+-type call_result() :: call_result(term()).
 
 -type cast_result() :: true.
 
--type multicall_result(Result) :: {[Result], _BadNodes :: [node()]}.
+-type multicall_result(Result) :: {[call_result(Result)], _BadNodes :: [node()]}.
 
 -type multicall_result() :: multicall_result(term()).
 
--type erpc(Ret) :: {ok, Ret}
-                 | {throw, _Err}
-                 | {exit, {exception | signal, _Reason}}
-                 | {error, {exception, _Reason, _Stack :: list()}}
-                 | {error, {erpc, _Reason}}.
+-type erpc(Ret) ::
+    {ok, Ret}
+    | {throw, _Err}
+    | {exit, {exception | signal, _Reason}}
+    | {error, {exception, _Reason, _Stack :: list()}}
+    | {error, {erpc, _Reason}}.
 
 -type erpc_multicall(Ret) :: [erpc(Ret)].
 
@@ -71,6 +79,10 @@ call(Node, Mod, Fun, Args) ->
 call(Key, Node, Mod, Fun, Args) ->
     filter_result(gen_rpc:call(rpc_node({Key, Node}), Mod, Fun, Args)).
 
+-spec call(term(), node(), module(), atom(), list(), timeout()) -> call_result().
+call(Key, Node, Mod, Fun, Args, Timeout) ->
+    filter_result(gen_rpc:call(rpc_node({Key, Node}), Mod, Fun, Args, Timeout)).
+
 -spec multicall([node()], module(), atom(), list()) -> multicall_result().
 multicall(Nodes, Mod, Fun, Args) ->
     gen_rpc:multicall(rpc_nodes(Nodes), Mod, Fun, Args).
@@ -81,11 +93,13 @@ multicall(Key, Nodes, Mod, Fun, Args) ->
 
 -spec cast(node(), module(), atom(), list()) -> cast_result().
 cast(Node, Mod, Fun, Args) ->
+    %% Note: using a non-ordered cast here, since the generated key is
+    %% random anyway:
     gen_rpc:cast(rpc_node(Node), Mod, Fun, Args).
 
 -spec cast(term(), node(), module(), atom(), list()) -> cast_result().
 cast(Key, Node, Mod, Fun, Args) ->
-    gen_rpc:cast(rpc_node({Key, Node}), Mod, Fun, Args).
+    gen_rpc:ordered_cast(rpc_node({Key, Node}), Mod, Fun, Args).
 
 rpc_node(Node) when is_atom(Node) ->
     {Node, rand:uniform(max_client_num())};
@@ -100,8 +114,9 @@ rpc_nodes([], Acc) ->
 rpc_nodes([Node | Nodes], Acc) ->
     rpc_nodes(Nodes, [rpc_node(Node) | Acc]).
 
-filter_result({Error, Reason})
-  when Error =:= badrpc; Error =:= badtcp ->
+filter_result({Error, Reason}) when
+    Error =:= badrpc; Error =:= badtcp
+->
     {badrpc, Reason};
 filter_result(Delivery) ->
     Delivery.

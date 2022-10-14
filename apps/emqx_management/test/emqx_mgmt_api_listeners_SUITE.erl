@@ -24,90 +24,272 @@ all() ->
     emqx_common_test_helpers:all(?MODULE).
 
 init_per_suite(Config) ->
-    emqx_mgmt_api_test_util:init_suite(),
+    emqx_mgmt_api_test_util:init_suite([emqx_conf]),
     Config.
 
 end_per_suite(_) ->
-    emqx_mgmt_api_test_util:end_suite().
+    emqx_conf:remove([listeners, tcp, new], #{override_to => cluster}),
+    emqx_conf:remove([listeners, tcp, new1], #{override_to => local}),
+    emqx_mgmt_api_test_util:end_suite([emqx_conf]).
 
 t_list_listeners(_) ->
     Path = emqx_mgmt_api_test_util:api_path(["listeners"]),
-    get_api(Path).
+    Res = request(get, Path, [], []),
+    #{<<"listeners">> := Expect} = emqx_mgmt_api_listeners:do_list_listeners(),
+    ?assertEqual(length(Expect), length(Res)),
 
-t_list_node_listeners(_) ->
-    Path = emqx_mgmt_api_test_util:api_path(["nodes", atom_to_binary(node(), utf8), "listeners"]),
-    get_api(Path).
+    %% POST /listeners
+    ListenerId = <<"tcp:default">>,
+    NewListenerId = <<"tcp:new">>,
 
-t_get_listeners(_) ->
-    LocalListener = emqx_mgmt_api_listeners:format(hd(emqx_mgmt:list_listeners())),
-    ID = maps:get(id, LocalListener),
-    Path = emqx_mgmt_api_test_util:api_path(["listeners", atom_to_list(ID)]),
-    get_api(Path).
+    OriginPath = emqx_mgmt_api_test_util:api_path(["listeners", ListenerId]),
+    NewPath = emqx_mgmt_api_test_util:api_path(["listeners", NewListenerId]),
 
-t_get_node_listeners(_) ->
-    LocalListener = emqx_mgmt_api_listeners:format(hd(emqx_mgmt:list_listeners())),
-    ID = maps:get(id, LocalListener),
-    Path = emqx_mgmt_api_test_util:api_path(
-        ["nodes", atom_to_binary(node(), utf8), "listeners", atom_to_list(ID)]),
-    get_api(Path).
+    OriginListener = request(get, OriginPath, [], []),
 
-t_manage_listener(_) ->
+    %% create with full options
+    ?assertEqual({error, not_found}, is_running(NewListenerId)),
+    ?assertMatch({error, {"HTTP/1.1", 404, _}}, request(get, NewPath, [], [])),
+
+    OriginListener2 = maps:remove(<<"id">>, OriginListener),
+    NewConf = OriginListener2#{
+        <<"name">> => <<"new">>,
+        <<"bind">> => <<"0.0.0.0:2883">>
+    },
+    Create = request(post, Path, [], NewConf),
+    ?assertEqual(lists:sort(maps:keys(OriginListener)), lists:sort(maps:keys(Create))),
+    Get1 = request(get, NewPath, [], []),
+    ?assertMatch(Create, Get1),
+    ?assert(is_running(NewListenerId)),
+
+    %% delete
+    ?assertEqual([], delete(NewPath)),
+    ?assertEqual({error, not_found}, is_running(NewListenerId)),
+    ?assertMatch({error, {"HTTP/1.1", 404, _}}, request(get, NewPath, [], [])),
+    ok.
+
+t_tcp_crud_listeners_by_id(_) ->
+    ListenerId = <<"tcp:default">>,
+    NewListenerId = <<"tcp:new">>,
+    MinListenerId = <<"tcp:min">>,
+    BadId = <<"tcp:bad">>,
+    Type = <<"tcp">>,
+    crud_listeners_by_id(ListenerId, NewListenerId, MinListenerId, BadId, Type).
+
+t_ssl_crud_listeners_by_id(_) ->
+    ListenerId = <<"ssl:default">>,
+    NewListenerId = <<"ssl:new">>,
+    MinListenerId = <<"ssl:min">>,
+    BadId = <<"ssl:bad">>,
+    Type = <<"ssl">>,
+    crud_listeners_by_id(ListenerId, NewListenerId, MinListenerId, BadId, Type).
+
+t_ws_crud_listeners_by_id(_) ->
+    ListenerId = <<"ws:default">>,
+    NewListenerId = <<"ws:new">>,
+    MinListenerId = <<"ws:min">>,
+    BadId = <<"ws:bad">>,
+    Type = <<"ws">>,
+    crud_listeners_by_id(ListenerId, NewListenerId, MinListenerId, BadId, Type).
+
+t_wss_crud_listeners_by_id(_) ->
+    ListenerId = <<"wss:default">>,
+    NewListenerId = <<"wss:new">>,
+    MinListenerId = <<"wss:min">>,
+    BadId = <<"wss:bad">>,
+    Type = <<"wss">>,
+    crud_listeners_by_id(ListenerId, NewListenerId, MinListenerId, BadId, Type).
+
+t_api_listeners_list_not_ready(_Config) ->
+    net_kernel:start(['listeners@127.0.0.1', longnames]),
+    ct:timetrap({seconds, 120}),
+    snabbkaffe:fix_ct_logging(),
+    Cluster = [{Name, Opts}, {Name1, Opts1}] = cluster([core, core]),
+    ct:pal("Starting ~p", [Cluster]),
+    Node1 = emqx_common_test_helpers:start_slave(Name, Opts),
+    Node2 = emqx_common_test_helpers:start_slave(Name1, Opts1),
+    try
+        L1 = get_tcp_listeners(Node1),
+
+        %% test init_config not ready.
+        _ = rpc:call(Node1, application, set_env, [emqx, init_config_load_done, false]),
+        assert_config_load_not_done(Node1),
+
+        L2 = get_tcp_listeners(Node1),
+        L3 = get_tcp_listeners(Node2),
+
+        Comment = #{
+            node1 => rpc:call(Node1, mria_mnesia, running_nodes, []),
+            node2 => rpc:call(Node2, mria_mnesia, running_nodes, [])
+        },
+
+        ?assert(length(L1) > length(L2), Comment),
+        ?assertEqual(length(L2), length(L3), Comment)
+    after
+        emqx_common_test_helpers:stop_slave(Node1),
+        emqx_common_test_helpers:stop_slave(Node2)
+    end.
+
+get_tcp_listeners(Node) ->
+    Query = #{query_string => #{<<"type">> => tcp}},
+    {200, L} = rpc:call(Node, emqx_mgmt_api_listeners, list_listeners, [get, Query]),
+    [#{node_status := NodeStatus}] = L,
+    ct:pal("Node:~p:~p", [Node, L]),
+    NodeStatus.
+
+assert_config_load_not_done(Node) ->
+    Done = rpc:call(Node, emqx_app, get_init_config_load_done, []),
+    ?assertNot(Done, #{node => Node}).
+
+cluster(Specs) ->
+    Env = [
+        {emqx, init_config_load_done, false},
+        {emqx, boot_modules, []}
+    ],
+    emqx_common_test_helpers:emqx_cluster(Specs, [
+        {env, Env},
+        {apps, [emqx_conf]},
+        {load_schema, false},
+        {join_to, true},
+        {env_handler, fun
+            (emqx) ->
+                application:set_env(emqx, boot_modules, []),
+                %% test init_config not ready.
+                application:set_env(emqx, init_config_load_done, false),
+                ok;
+            (_) ->
+                ok
+        end}
+    ]).
+
+crud_listeners_by_id(ListenerId, NewListenerId, MinListenerId, BadId, Type) ->
+    OriginPath = emqx_mgmt_api_test_util:api_path(["listeners", ListenerId]),
+    NewPath = emqx_mgmt_api_test_util:api_path(["listeners", NewListenerId]),
+    OriginListener = request(get, OriginPath, [], []),
+
+    %% create with full options
+    ?assertEqual({error, not_found}, is_running(NewListenerId)),
+    ?assertMatch({error, {"HTTP/1.1", 404, _}}, request(get, NewPath, [], [])),
+    NewConf = OriginListener#{
+        <<"id">> => NewListenerId,
+        <<"bind">> => <<"0.0.0.0:2883">>
+    },
+    Create = request(post, NewPath, [], NewConf),
+    ?assertEqual(lists:sort(maps:keys(OriginListener)), lists:sort(maps:keys(Create))),
+    Get1 = request(get, NewPath, [], []),
+    ?assertMatch(Create, Get1),
+    ?assert(is_running(NewListenerId)),
+
+    %% create with required options
+    MinPath = emqx_mgmt_api_test_util:api_path(["listeners", MinListenerId]),
+    ?assertEqual({error, not_found}, is_running(MinListenerId)),
+    ?assertMatch({error, {"HTTP/1.1", 404, _}}, request(get, MinPath, [], [])),
+    MinConf =
+        case OriginListener of
+            #{
+                <<"ssl_options">> :=
+                    #{
+                        <<"cacertfile">> := CaCertFile,
+                        <<"certfile">> := CertFile,
+                        <<"keyfile">> := KeyFile
+                    }
+            } ->
+                #{
+                    <<"id">> => MinListenerId,
+                    <<"bind">> => <<"0.0.0.0:3883">>,
+                    <<"type">> => Type,
+                    <<"ssl_options">> => #{
+                        <<"cacertfile">> => CaCertFile,
+                        <<"certfile">> => CertFile,
+                        <<"keyfile">> => KeyFile
+                    }
+                };
+            _ ->
+                #{
+                    <<"id">> => MinListenerId,
+                    <<"bind">> => <<"0.0.0.0:3883">>,
+                    <<"type">> => Type
+                }
+        end,
+    MinCreate = request(post, MinPath, [], MinConf),
+    ?assertEqual(lists:sort(maps:keys(OriginListener)), lists:sort(maps:keys(MinCreate))),
+    MinGet = request(get, MinPath, [], []),
+    ?assertMatch(MinCreate, MinGet),
+    ?assert(is_running(MinListenerId)),
+
+    %% bad create(same port)
+    BadPath = emqx_mgmt_api_test_util:api_path(["listeners", BadId]),
+    BadConf = OriginListener#{
+        <<"id">> => BadId,
+        <<"bind">> => <<"0.0.0.0:2883">>
+    },
+    ?assertMatch({error, {"HTTP/1.1", 400, _}}, request(post, BadPath, [], BadConf)),
+
+    %% update
+    #{<<"acceptors">> := Acceptors} = Create,
+    Acceptors1 = Acceptors + 10,
+    Update =
+        request(put, NewPath, [], Create#{<<"acceptors">> => Acceptors1}),
+    ?assertMatch(#{<<"acceptors">> := Acceptors1}, Update),
+    Get2 = request(get, NewPath, [], []),
+    ?assertMatch(#{<<"acceptors">> := Acceptors1}, Get2),
+    ?assert(is_running(NewListenerId)),
+
+    %% update an stopped listener
+    action_listener(NewListenerId, "stop", false),
+    ?assertNot(is_running(NewListenerId)),
+    %% update
+    Get3 = request(get, NewPath, [], []),
+    #{<<"acceptors">> := Acceptors3} = Get3,
+    Acceptors4 = Acceptors3 + 1,
+    Update1 =
+        request(put, NewPath, [], Get3#{<<"acceptors">> => Acceptors4}),
+    ?assertMatch(#{<<"acceptors">> := Acceptors4}, Update1),
+    Get4 = request(get, NewPath, [], []),
+    ?assertMatch(#{<<"acceptors">> := Acceptors4}, Get4),
+    ?assertNot(is_running(NewListenerId)),
+
+    %% delete
+    ?assertEqual([], delete(NewPath)),
+    ?assertEqual([], delete(MinPath)),
+    ?assertEqual({error, not_found}, is_running(NewListenerId)),
+    ?assertMatch({error, {"HTTP/1.1", 404, _}}, request(get, NewPath, [], [])),
+    ?assertEqual([], delete(NewPath)),
+    ok.
+
+t_delete_nonexistent_listener(_) ->
+    NonExist = emqx_mgmt_api_test_util:api_path(["listeners", "tcp:nonexistent"]),
+    ?assertEqual([], delete(NonExist)),
+    ok.
+
+t_action_listeners(_) ->
     ID = "tcp:default",
-    manage_listener(ID, "stop", false),
-    manage_listener(ID, "start", true),
-    manage_listener(ID, "restart", true).
+    action_listener(ID, "stop", false),
+    action_listener(ID, "start", true),
+    action_listener(ID, "restart", true).
 
-manage_listener(ID, Operation, Running) ->
-    Path = emqx_mgmt_api_test_util:api_path(["listeners", ID, "operation", Operation]),
+action_listener(ID, Action, Running) ->
+    Path = emqx_mgmt_api_test_util:api_path(["listeners", ID, Action]),
     {ok, _} = emqx_mgmt_api_test_util:request_api(post, Path),
     timer:sleep(500),
     GetPath = emqx_mgmt_api_test_util:api_path(["listeners", ID]),
-    {ok, ListenersResponse} = emqx_mgmt_api_test_util:request_api(get, GetPath),
-    Listeners = emqx_json:decode(ListenersResponse, [return_maps]),
-    [listener_stats(Listener, Running) || Listener <- Listeners].
+    Listener = request(get, GetPath, [], []),
+    listener_stats(Listener, Running).
 
-get_api(Path) ->
-    {ok, ListenersData} = emqx_mgmt_api_test_util:request_api(get, Path),
-    LocalListeners = emqx_mgmt_api_listeners:format(emqx_mgmt:list_listeners()),
-    case emqx_json:decode(ListenersData, [return_maps]) of
-        [Listener] ->
-            ID = binary_to_atom(maps:get(<<"id">>, Listener), utf8),
-            Filter =
-                fun(Local) ->
-                    maps:get(id, Local) =:= ID
-                end,
-            LocalListener = hd(lists:filter(Filter, LocalListeners)),
-            comparison_listener(LocalListener, Listener);
-        Listeners when is_list(Listeners) ->
-            ?assertEqual(erlang:length(LocalListeners), erlang:length(Listeners)),
-            Fun =
-                fun(LocalListener) ->
-                    ID = maps:get(id, LocalListener),
-                    IDBinary = atom_to_binary(ID, utf8),
-                    Filter =
-                        fun(Listener) ->
-                            maps:get(<<"id">>, Listener) =:= IDBinary
-                        end,
-                    Listener = hd(lists:filter(Filter, Listeners)),
-                    comparison_listener(LocalListener, Listener)
-                end,
-            lists:foreach(Fun, LocalListeners);
-        Listener when is_map(Listener) ->
-            ID = binary_to_atom(maps:get(<<"id">>, Listener), utf8),
-            Filter =
-                fun(Local) ->
-                    maps:get(id, Local) =:= ID
-                end,
-            LocalListener = hd(lists:filter(Filter, LocalListeners)),
-            comparison_listener(LocalListener, Listener)
+request(Method, Url, QueryParams, Body) ->
+    AuthHeader = emqx_mgmt_api_test_util:auth_header_(),
+    case emqx_mgmt_api_test_util:request_api(Method, Url, QueryParams, AuthHeader, Body) of
+        {ok, Res} -> emqx_json:decode(Res, [return_maps]);
+        Error -> Error
     end.
 
-comparison_listener(Local, Response) ->
-    ?assertEqual(maps:get(id, Local), binary_to_atom(maps:get(<<"id">>, Response))),
-    ?assertEqual(maps:get(node, Local), binary_to_atom(maps:get(<<"node">>, Response))),
-    ?assertEqual(maps:get(acceptors, Local), maps:get(<<"acceptors">>, Response)),
-    ?assertEqual(maps:get(running, Local), maps:get(<<"running">>, Response)).
-
+delete(Url) ->
+    AuthHeader = emqx_mgmt_api_test_util:auth_header_(),
+    {ok, Res} = emqx_mgmt_api_test_util:request_api(delete, Url, AuthHeader),
+    Res.
 
 listener_stats(Listener, ExpectedStats) ->
     ?assertEqual(ExpectedStats, maps:get(<<"running">>, Listener)).
+
+is_running(Id) ->
+    emqx_listeners:is_running(binary_to_atom(Id)).

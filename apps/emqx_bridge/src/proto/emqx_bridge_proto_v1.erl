@@ -18,11 +18,16 @@
 
 -behaviour(emqx_bpapi).
 
--export([ introduced_in/0
+-export([
+    introduced_in/0,
 
-        , list_bridges/1
-        , lookup_from_all_nodes/3
-        ]).
+    list_bridges/1,
+    restart_bridge_to_node/3,
+    stop_bridge_to_node/3,
+    lookup_from_all_nodes/3,
+    restart_bridges_to_all_nodes/3,
+    stop_bridges_to_all_nodes/3
+]).
 
 -include_lib("emqx/include/bpapi.hrl").
 
@@ -37,7 +42,57 @@ list_bridges(Node) ->
 
 -type key() :: atom() | binary() | [byte()].
 
+-spec restart_bridge_to_node(node(), key(), key()) ->
+    term().
+restart_bridge_to_node(Node, BridgeType, BridgeName) ->
+    rpc:call(
+        Node,
+        emqx_bridge_resource,
+        restart,
+        [BridgeType, BridgeName],
+        ?TIMEOUT
+    ).
+
+-spec stop_bridge_to_node(node(), key(), key()) ->
+    term().
+stop_bridge_to_node(Node, BridgeType, BridgeName) ->
+    rpc:call(
+        Node,
+        emqx_bridge_resource,
+        stop,
+        [BridgeType, BridgeName],
+        ?TIMEOUT
+    ).
+
+-spec restart_bridges_to_all_nodes([node()], key(), key()) ->
+    emqx_rpc:erpc_multicall().
+restart_bridges_to_all_nodes(Nodes, BridgeType, BridgeName) ->
+    erpc:multicall(
+        Nodes,
+        emqx_bridge_resource,
+        restart,
+        [BridgeType, BridgeName],
+        ?TIMEOUT
+    ).
+
+-spec stop_bridges_to_all_nodes([node()], key(), key()) ->
+    emqx_rpc:erpc_multicall().
+stop_bridges_to_all_nodes(Nodes, BridgeType, BridgeName) ->
+    erpc:multicall(
+        Nodes,
+        emqx_bridge_resource,
+        stop,
+        [BridgeType, BridgeName],
+        ?TIMEOUT
+    ).
+
 -spec lookup_from_all_nodes([node()], key(), key()) ->
-          emqx_rpc:erpc_multicall().
+    emqx_rpc:erpc_multicall().
 lookup_from_all_nodes(Nodes, BridgeType, BridgeName) ->
-    erpc:multicall(Nodes, emqx_bridge_api, lookup_from_local_node, [BridgeType, BridgeName], ?TIMEOUT).
+    erpc:multicall(
+        Nodes,
+        emqx_bridge_api,
+        lookup_from_local_node,
+        [BridgeType, BridgeName],
+        ?TIMEOUT
+    ).

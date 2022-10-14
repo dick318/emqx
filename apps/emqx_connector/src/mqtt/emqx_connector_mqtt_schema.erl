@@ -17,223 +17,286 @@
 -module(emqx_connector_mqtt_schema).
 
 -include_lib("typerefl/include/types.hrl").
+-include_lib("hocon/include/hoconsc.hrl").
 
 -behaviour(hocon_schema).
 
--export([ roots/0
-        , fields/1
-        ]).
+-export([
+    namespace/0,
+    roots/0,
+    fields/1,
+    desc/1
+]).
 
--export([ ingress_desc/0
-        , egress_desc/0
-        ]).
+-export([
+    ingress_desc/0,
+    egress_desc/0
+]).
 
 -import(emqx_schema, [mk_duration/2]).
+
+namespace() -> "connector-mqtt".
 
 roots() ->
     fields("config").
 
 fields("config") ->
     fields("connector") ++
-    topic_mappings();
-
+        topic_mappings();
 fields("connector") ->
-    [ {mode,
-        sc(hoconsc:enum([cluster_shareload]),
-           #{ default => cluster_shareload
-            , desc => """
-The mode of the MQTT Bridge. Can be one of 'cluster_singleton' or 'cluster_shareload'<br>
-
-- cluster_singleton: create an unique MQTT connection within the emqx cluster.<br>
-In 'cluster_singleton' node, all messages toward the remote broker go through the same
-MQTT connection.<br>
-- cluster_shareload: create an MQTT connection on each node in the emqx cluster.<br>
-In 'cluster_shareload' mode, the incoming load from the remote broker is shared by
-using shared subscription.<br>
-Note that the 'clientid' is suffixed by the node name, this is to avoid
-clientid conflicts between different nodes. And we can only use shared subscription
-topic filters for 'remote_topic' of ingress connections.
-"""
-            })}
-    , {name,
-       sc(binary(),
-          #{ nullable => true
-           , desc => "Connector name, used as a human-readable description of the connector."
-           })}
-    , {server,
-        sc(emqx_schema:ip_port(),
-           #{ default => "127.0.0.1:1883"
-            , desc => "The host and port of the remote MQTT broker"
-            })}
-    , {reconnect_interval, mk_duration("reconnect interval", #{default => "15s"})}
-    , {proto_ver,
-        sc(hoconsc:enum([v3, v4, v5]),
-           #{ default => v4
-            , desc => "The MQTT protocol version"
-            })}
-    , {username,
-        sc(binary(),
-           #{ default => "emqx"
-            , desc => "The username of the MQTT protocol"
-            })}
-    , {password,
-        sc(binary(),
-           #{ default => "emqx"
-            , desc => "The password of the MQTT protocol"
-            })}
-    , {clean_start,
-        sc(boolean(),
-           #{ default => true
-            , desc => "The clean-start or the clean-session of the MQTT protocol"
-            })}
-    , {keepalive, mk_duration("keepalive", #{default => "300s"})}
-    , {retry_interval, mk_duration("retry interval", #{default => "15s"})}
-    , {max_inflight,
-        sc(integer(),
-           #{ default => 32
-            , desc => "Max inflight messages (sent but ACK has not received) of the MQTT protocol"
-            })}
-    , {replayq,
-        sc(ref("replayq"),
-           #{ desc => """
-Queue messages in disk files.
-"""
-            })}
+    [
+        {mode,
+            sc(
+                hoconsc:enum([cluster_shareload]),
+                #{
+                    default => cluster_shareload,
+                    desc => ?DESC("mode")
+                }
+            )},
+        {server,
+            sc(
+                emqx_schema:host_port(),
+                #{
+                    required => true,
+                    desc => ?DESC("server")
+                }
+            )},
+        {reconnect_interval,
+            mk_duration(
+                "Reconnect interval. Delay for the MQTT bridge to retry establishing the connection "
+                "in case of transportation failure.",
+                #{default => "15s"}
+            )},
+        {proto_ver,
+            sc(
+                hoconsc:enum([v3, v4, v5]),
+                #{
+                    default => v4,
+                    desc => ?DESC("proto_ver")
+                }
+            )},
+        {bridge_mode,
+            sc(
+                boolean(),
+                #{
+                    default => false,
+                    desc => ?DESC("bridge_mode")
+                }
+            )},
+        {username,
+            sc(
+                binary(),
+                #{
+                    desc => ?DESC("username")
+                }
+            )},
+        {password,
+            sc(
+                binary(),
+                #{
+                    desc => ?DESC("password")
+                }
+            )},
+        {clean_start,
+            sc(
+                boolean(),
+                #{
+                    default => true,
+                    desc => ?DESC("clean_start")
+                }
+            )},
+        {keepalive, mk_duration("MQTT Keepalive.", #{default => "300s"})},
+        {retry_interval,
+            mk_duration(
+                "Message retry interval. Delay for the MQTT bridge to retry sending the QoS1/QoS2 "
+                "messages in case of ACK not received.",
+                #{default => "15s"}
+            )},
+        {max_inflight,
+            sc(
+                non_neg_integer(),
+                #{
+                    default => 32,
+                    desc => ?DESC("max_inflight")
+                }
+            )},
+        {replayq, sc(ref("replayq"), #{})}
     ] ++ emqx_connector_schema_lib:ssl_fields();
-
 fields("ingress") ->
     %% the message maybe subscribed by rules, in this case 'local_topic' is not necessary
-    [ {remote_topic,
-        sc(binary(),
-           #{ nullable => false
-            , desc => "Receive messages from which topic of the remote broker"
-            })}
-    , {remote_qos,
-        sc(qos(),
-           #{ default => 1
-            , desc => "The QoS level to be used when subscribing to the remote broker"
-            })}
-    , {local_topic,
-        sc(binary(),
-           #{ desc => """
-Send messages to which topic of the local broker.<br>
-Template with variables is allowed.
-"""
-            })}
-    , {local_qos,
-        sc(qos(),
-           #{ default => <<"${qos}">>
-            , desc => """
-The QoS of the MQTT message to be sent.<br>
-Template with variables is allowed."""
-            })}
-    , {hookpoint,
-        sc(binary(),
-           #{ desc => """
-The hook point will be triggered when there's any message received from the remote broker.
-"""
-            })}
-    ] ++ common_inout_confs();
+    [
+        {remote_topic,
+            sc(
+                binary(),
+                #{
+                    required => true,
+                    validator => fun emqx_schema:non_empty_string/1,
+                    desc => ?DESC("ingress_remote_topic")
+                }
+            )},
+        {remote_qos,
+            sc(
+                qos(),
+                #{
+                    default => 1,
+                    desc => ?DESC("ingress_remote_qos")
+                }
+            )},
+        {local_topic,
+            sc(
+                binary(),
+                #{
+                    validator => fun emqx_schema:non_empty_string/1,
+                    desc => ?DESC("ingress_local_topic")
+                }
+            )},
+        {local_qos,
+            sc(
+                qos(),
+                #{
+                    default => <<"${qos}">>,
+                    desc => ?DESC("ingress_local_qos")
+                }
+            )},
+        {hookpoint,
+            sc(
+                binary(),
+                #{desc => ?DESC("ingress_hookpoint")}
+            )},
 
+        {retain,
+            sc(
+                hoconsc:union([boolean(), binary()]),
+                #{
+                    default => <<"${retain}">>,
+                    desc => ?DESC("retain")
+                }
+            )},
+
+        {payload,
+            sc(
+                binary(),
+                #{
+                    default => undefined,
+                    desc => ?DESC("payload")
+                }
+            )}
+    ];
 fields("egress") ->
     %% the message maybe sent from rules, in this case 'local_topic' is not necessary
-    [ {local_topic,
-        sc(binary(),
-           #{ desc => "The local topic to be forwarded to the remote broker"
-            })}
-    , {remote_topic,
-        sc(binary(),
-           #{ default => <<"${topic}">>
-            , desc => """
-Forward to which topic of the remote broker.<br>
-Template with variables is allowed.
-"""
-            })}
-    , {remote_qos,
-        sc(qos(),
-           #{ default => <<"${qos}">>
-            , desc => """
-The QoS of the MQTT message to be sent.<br>
-Template with variables is allowed."""
-            })}
-    ] ++ common_inout_confs();
+    [
+        {local_topic,
+            sc(
+                binary(),
+                #{
+                    desc => ?DESC("egress_local_topic"),
+                    validator => fun emqx_schema:non_empty_string/1
+                }
+            )},
+        {remote_topic,
+            sc(
+                binary(),
+                #{
+                    required => true,
+                    validator => fun emqx_schema:non_empty_string/1,
+                    desc => ?DESC("egress_remote_topic")
+                }
+            )},
+        {remote_qos,
+            sc(
+                qos(),
+                #{
+                    required => true,
+                    desc => ?DESC("egress_remote_qos")
+                }
+            )},
 
+        {retain,
+            sc(
+                hoconsc:union([boolean(), binary()]),
+                #{
+                    required => true,
+                    desc => ?DESC("retain")
+                }
+            )},
+
+        {payload,
+            sc(
+                binary(),
+                #{
+                    default => undefined,
+                    desc => ?DESC("payload")
+                }
+            )}
+    ];
 fields("replayq") ->
-    [ {dir,
-        sc(hoconsc:union([boolean(), string()]),
-           #{ desc => """
-The dir where the replayq file saved.<br>
-Set to 'false' disables the replayq feature.
-"""
-            })}
-    , {seg_bytes,
-        sc(emqx_schema:bytesize(),
-           #{ default => "100MB"
-            , desc => """
-The size in bytes of a single segment.<br>
-A segment is mapping to a file in the replayq dir. If the current segment is full, a new segment
-(file) will be opened to write.
-"""
-            })}
-    , {offload,
-        sc(boolean(),
-           #{ default => false
-            , desc => """
-In offload mode, the disk queue is only used to offload queue tail segments.<br>
-The messages are cached in the memory first, then it write to the replayq files after the size of
-the memory cache reaches 'seg_bytes'.
-"""
-            })}
+    [
+        {dir,
+            sc(
+                hoconsc:union([boolean(), string()]),
+                #{desc => ?DESC("dir")}
+            )},
+        {seg_bytes,
+            sc(
+                emqx_schema:bytesize(),
+                #{
+                    default => "100MB",
+                    desc => ?DESC("seg_bytes")
+                }
+            )},
+        {offload,
+            sc(
+                boolean(),
+                #{
+                    default => false,
+                    desc => ?DESC("offload")
+                }
+            )}
     ].
+
+desc("connector") ->
+    ?DESC("desc_connector");
+desc("ingress") ->
+    ingress_desc();
+desc("egress") ->
+    egress_desc();
+desc("replayq") ->
+    ?DESC("desc_replayq");
+desc(_) ->
+    undefined.
 
 topic_mappings() ->
-    [ {ingress,
-        sc(ref("ingress"),
-           #{ default => #{}
-            , desc => ingress_desc()
-            })}
-    , {egress,
-        sc(ref("egress"),
-           #{ default => #{}
-            , desc => egress_desc()
-            })}
+    [
+        {ingress,
+            sc(
+                ref("ingress"),
+                #{default => #{}}
+            )},
+        {egress,
+            sc(
+                ref("egress"),
+                #{default => #{}}
+            )}
     ].
 
-ingress_desc() -> """
-The ingress config defines how this bridge receive messages from the remote MQTT broker, and then
-send them to the local broker.<br>
-Template with variables is allowed in 'local_topic', 'remote_qos', 'qos', 'retain',
-'payload'.<br>
-NOTE: if this bridge is used as the input of a rule (emqx rule engine), and also local_topic is
-configured, then messages got from the remote broker will be sent to both the 'local_topic' and
-the rule.
-""".
+ingress_desc() ->
+    "\n"
+    "The ingress config defines how this bridge receive messages from the remote MQTT broker, and then\n"
+    "send them to the local broker.</br>\n"
+    "Template with variables is allowed in 'local_topic', 'remote_qos', 'qos', 'retain',\n"
+    "'payload'.</br>\n"
+    "NOTE: if this bridge is used as the input of a rule (emqx rule engine), and also local_topic is\n"
+    "configured, then messages got from the remote broker will be sent to both the 'local_topic' and\n"
+    "the rule.\n".
 
-egress_desc() -> """
-The egress config defines how this bridge forwards messages from the local broker to the remote
-broker.<br>
-Template with variables is allowed in 'remote_topic', 'qos', 'retain', 'payload'.<br>
-NOTE: if this bridge is used as the output of a rule (emqx rule engine), and also local_topic
-is configured, then both the data got from the rule and the MQTT messages that matches
-local_topic will be forwarded.
-""".
-
-common_inout_confs() ->
-    [ {retain,
-        sc(hoconsc:union([boolean(), binary()]),
-           #{ default => <<"${retain}">>
-            , desc => """
-The retain flag of the MQTT message to be sent.<br>
-Template with variables is allowed."""
-            })}
-    , {payload,
-        sc(binary(),
-           #{ default => <<"${payload}">>
-            , desc => """
-The payload of the MQTT message to be sent.<br>
-Template with variables is allowed."""
-            })}
-    ].
+egress_desc() ->
+    "\n"
+    "The egress config defines how this bridge forwards messages from the local broker to the remote\n"
+    "broker.</br>\n"
+    "Template with variables is allowed in 'remote_topic', 'qos', 'retain', 'payload'.</br>\n"
+    "NOTE: if this bridge is used as the action of a rule (emqx rule engine), and also local_topic\n"
+    "is configured, then both the data got from the rule and the MQTT messages that matches\n"
+    "local_topic will be forwarded.\n".
 
 qos() ->
     hoconsc:union([emqx_schema:qos(), binary()]).

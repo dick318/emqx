@@ -1,7 +1,7 @@
 %%--------------------------------------------------------------------
 %% Copyright (c) 2022 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
-%% @doc EMQ X License Management CLI.
+%% @doc EMQX License Management CLI.
 %%--------------------------------------------------------------------
 
 -ifndef(_EMQX_LICENSE_).
@@ -9,21 +9,21 @@
 
 -define(EVALUATION_LOG,
     "\n"
-    "===============================================================================\n"
-    "This is an evaluation license that is restricted to 10 concurrent connections.\n"
-    "If you already have a paid license, please apply it now.\n"
-    "Or you could visit https://emqx.com/apply-licenses/emqx to get a trial license.\n"
-    "===============================================================================\n"
-    ).
+    "========================================================================\n"
+    "Using an evaluation license limited to ~p concurrent connections.\n"
+    "Apply for a license at https://emqx.com/apply-licenses/emqx.\n"
+    "Or contact EMQ customer services.\n"
+    "========================================================================\n"
+).
 
 -define(EXPIRY_LOG,
     "\n"
-    "======================================================\n"
-    "Your license has expired.\n"
-    "Please visit https://emqx.com/apply-licenses/emqx or\n"
-    "contact our customer services for an updated license.\n"
-    "======================================================\n"
-    ).
+    "========================================================================\n"
+    "License has been expired for ~p days.\n"
+    "Apply for a new license at https://emqx.com/apply-licenses/emqx.\n"
+    "Or contact EMQ customer services.\n"
+    "========================================================================\n"
+).
 
 -define(OFFICIAL, 1).
 -define(TRIAL, 0).

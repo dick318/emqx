@@ -32,36 +32,39 @@
 
 -behaviour(hocon_schema).
 
--reflect_type([ log_level/0,
-                file/0,
-                cipher/0]).
+-reflect_type([
+    log_level/0,
+    file/0,
+    cipher/0
+]).
 
--export([namespace/0, roots/0, fields/1, translations/0, translation/1]).
+-export([namespace/0, roots/0, fields/1, translations/0, translation/1, validations/0, desc/1]).
 -export([conf_get/2, conf_get/3, keys/2, filter/1]).
 
 %% Static apps which merge their configs into the merged emqx.conf
 %% The list can not be made a dynamic read at run-time as it is used
-%% by nodetool to generate app.<time>.config before EMQ X is started
--define(MERGED_CONFIGS,
-        [ emqx_bridge_schema
-        , emqx_retainer_schema
-        , emqx_statsd_schema
-        , emqx_authn_schema
-        , emqx_authz_schema
-        , emqx_auto_subscribe_schema
-        , emqx_modules_schema
-        , emqx_plugins_schema
-        , emqx_dashboard_schema
-        , emqx_gateway_schema
-        , emqx_prometheus_schema
-        , emqx_rule_engine_schema
-        , emqx_exhook_schema
-        , emqx_psk_schema
-        , emqx_limiter_schema
-        , emqx_connector_schema
-        , emqx_slow_subs_schema
-        ]).
+%% by nodetool to generate app.<time>.config before EMQX is started
+-define(MERGED_CONFIGS, [
+    emqx_bridge_schema,
+    emqx_retainer_schema,
+    emqx_statsd_schema,
+    emqx_authn_schema,
+    emqx_authz_schema,
+    emqx_auto_subscribe_schema,
+    emqx_modules_schema,
+    emqx_plugins_schema,
+    emqx_dashboard_schema,
+    emqx_gateway_schema,
+    emqx_prometheus_schema,
+    emqx_rule_engine_schema,
+    emqx_exhook_schema,
+    emqx_psk_schema,
+    emqx_limiter_schema,
+    emqx_connector_schema,
+    emqx_slow_subs_schema
+]).
 
+%% root config should not have a namespace
 namespace() -> undefined.
 
 roots() ->
@@ -71,560 +74,921 @@ roots() ->
         _ -> ok
     end,
     emqx_schema_high_prio_roots() ++
-    [ {"node",
-       sc(hoconsc:ref("node"),
-          #{ desc => "Node name, cookie, config & data directories "
-                     "and the Erlang virtual machine (BEAM) boot parameters."
-           })}
-    , {"cluster",
-       sc(hoconsc:ref("cluster"),
-          #{ desc => "EMQ X nodes can form a cluster to scale up the total capacity.<br>"
-                     "Here holds the configs to instruct how individual nodes "
-                     "can discover each other."
-           })}
-    , {"log",
-       sc(hoconsc:ref("log"),
-          #{ desc => "Configure logging backends (to console or to file), "
-                     "and logging level for each logger backend."
-           })}
-    , {"rpc",
-       sc(hoconsc:ref("rpc"),
-          #{ desc => "EMQ X uses a library called <code>gen_rpc</code> for "
-                     "inter-broker communication.<br/>Most of the time the default config "
-                     "should work, but in case you need to do performance "
-                     "fine-turning or experiment a bit, this is where to look."
-           })}
-    , {"db",
-       sc(ref("db"),
-          #{ desc => "Settings of the embedded database."
-           })}
-    ] ++
-    emqx_schema:roots(medium) ++
-    emqx_schema:roots(low) ++
-    lists:flatmap(fun roots/1, ?MERGED_CONFIGS).
+        [
+            {"node",
+                sc(
+                    ?R_REF("node"),
+                    #{translate_to => ["emqx"]}
+                )},
+            {"cluster",
+                sc(
+                    ?R_REF("cluster"),
+                    #{translate_to => ["ekka"]}
+                )},
+            {"log",
+                sc(
+                    ?R_REF("log"),
+                    #{translate_to => ["kernel"]}
+                )},
+            {"rpc",
+                sc(
+                    ?R_REF("rpc"),
+                    #{translate_to => ["gen_rpc"]}
+                )}
+        ] ++
+        emqx_schema:roots(medium) ++
+        emqx_schema:roots(low) ++
+        lists:flatmap(fun roots/1, ?MERGED_CONFIGS).
+
+validations() ->
+    hocon_schema:validations(emqx_schema) ++
+        lists:flatmap(fun hocon_schema:validations/1, ?MERGED_CONFIGS).
 
 fields("cluster") ->
-    [ {"name",
-       sc(atom(),
-          #{ mapping => "ekka.cluster_name"
-           , default => emqxcl
-           })}
-    , {"discovery_strategy",
-       sc(hoconsc:enum([manual, static, mcast, dns, etcd, k8s]),
-          #{ default => manual
-           })}
-    , {"autoclean",
-       sc(emqx_schema:duration(),
-          #{ mapping => "ekka.cluster_autoclean"
-           , default => "5m"
-           })}
-    , {"autoheal",
-       sc(boolean(),
-          #{ mapping => "ekka.cluster_autoheal"
-           , default => true
-           })}
-    , {"static",
-       sc(ref(cluster_static),
-          #{})}
-    , {"mcast",
-       sc(ref(cluster_mcast),
-          #{})}
-    , {"proto_dist",
-       sc(hoconsc:enum([inet_tcp, inet6_tcp, inet_tls]),
-          #{ mapping => "ekka.proto_dist"
-           , default => inet_tcp
-           })}
-    , {"dns",
-       sc(ref(cluster_dns),
-          #{})}
-    , {"etcd",
-       sc(ref(cluster_etcd),
-          #{})}
-    , {"k8s",
-       sc(ref(cluster_k8s),
-          #{})}
+    [
+        {"name",
+            sc(
+                atom(),
+                #{
+                    mapping => "ekka.cluster_name",
+                    default => emqxcl,
+                    desc => ?DESC(cluster_name),
+                    'readOnly' => true
+                }
+            )},
+        {"discovery_strategy",
+            sc(
+                hoconsc:enum([manual, static, mcast, dns, etcd, k8s]),
+                #{
+                    default => manual,
+                    desc => ?DESC(cluster_discovery_strategy),
+                    'readOnly' => true
+                }
+            )},
+        {"core_nodes",
+            sc(
+                emqx_schema:comma_separated_atoms(),
+                #{
+                    mapping => "mria.core_nodes",
+                    default => [],
+                    'readOnly' => true,
+                    desc => ?DESC(db_core_nodes)
+                }
+            )},
+        {"autoclean",
+            sc(
+                emqx_schema:duration(),
+                #{
+                    mapping => "ekka.cluster_autoclean",
+                    default => "5m",
+                    desc => ?DESC(cluster_autoclean),
+                    'readOnly' => true
+                }
+            )},
+        {"autoheal",
+            sc(
+                boolean(),
+                #{
+                    mapping => "ekka.cluster_autoheal",
+                    default => true,
+                    desc => ?DESC(cluster_autoheal),
+                    'readOnly' => true
+                }
+            )},
+        {"proto_dist",
+            sc(
+                hoconsc:enum([inet_tcp, inet6_tcp, inet_tls]),
+                #{
+                    mapping => "ekka.proto_dist",
+                    default => inet_tcp,
+                    'readOnly' => true,
+                    desc => ?DESC(cluster_proto_dist)
+                }
+            )},
+        {"static",
+            sc(
+                ?R_REF(cluster_static),
+                #{}
+            )},
+        {"mcast",
+            sc(
+                ?R_REF(cluster_mcast),
+                #{}
+            )},
+        {"dns",
+            sc(
+                ?R_REF(cluster_dns),
+                #{}
+            )},
+        {"etcd",
+            sc(
+                ?R_REF(cluster_etcd),
+                #{}
+            )},
+        {"k8s",
+            sc(
+                ?R_REF(cluster_k8s),
+                #{}
+            )}
     ];
-
 fields(cluster_static) ->
-    [ {"seeds",
-      sc(hoconsc:array(atom()),
-         #{ default => []
-          })}
+    [
+        {"seeds",
+            sc(
+                hoconsc:array(atom()),
+                #{
+                    default => [],
+                    desc => ?DESC(cluster_static_seeds),
+                    'readOnly' => true
+                }
+            )}
     ];
-
 fields(cluster_mcast) ->
-    [ {"addr",
-       sc(string(),
-          #{ default => "239.192.0.1"
-           })}
-    , {"ports",
-       sc(hoconsc:array(integer()),
-          #{ default => [4369, 4370]
-           })}
-    , {"iface",
-       sc(string(),
-          #{ default => "0.0.0.0"
-           })}
-    , {"ttl",
-       sc(range(0, 255),
-          #{ default => 255
-           })}
-    , {"loop",
-       sc(boolean(),
-          #{ default => true
-           })}
-    , {"sndbuf",
-       sc(emqx_schema:bytesize(),
-          #{ default => "16KB"
-           })}
-    , {"recbuf",
-       sc(emqx_schema:bytesize(),
-          #{ default => "16KB"
-           })}
-    , {"buffer",
-       sc(emqx_schema:bytesize(),
-          #{ default =>"32KB"
-           })}
+    [
+        {"addr",
+            sc(
+                string(),
+                #{
+                    default => "239.192.0.1",
+                    desc => ?DESC(cluster_mcast_addr),
+                    'readOnly' => true
+                }
+            )},
+        {"ports",
+            sc(
+                hoconsc:array(integer()),
+                #{
+                    default => [4369, 4370],
+                    'readOnly' => true,
+                    desc => ?DESC(cluster_mcast_ports)
+                }
+            )},
+        {"iface",
+            sc(
+                string(),
+                #{
+                    default => "0.0.0.0",
+                    desc => ?DESC(cluster_mcast_iface),
+                    'readOnly' => true
+                }
+            )},
+        {"ttl",
+            sc(
+                range(0, 255),
+                #{
+                    default => 255,
+                    desc => ?DESC(cluster_mcast_ttl),
+                    'readOnly' => true
+                }
+            )},
+        {"loop",
+            sc(
+                boolean(),
+                #{
+                    default => true,
+                    desc => ?DESC(cluster_mcast_loop),
+                    'readOnly' => true
+                }
+            )},
+        {"sndbuf",
+            sc(
+                emqx_schema:bytesize(),
+                #{
+                    default => "16KB",
+                    desc => ?DESC(cluster_mcast_sndbuf),
+                    'readOnly' => true
+                }
+            )},
+        {"recbuf",
+            sc(
+                emqx_schema:bytesize(),
+                #{
+                    default => "16KB",
+                    desc => ?DESC(cluster_mcast_recbuf),
+                    'readOnly' => true
+                }
+            )},
+        {"buffer",
+            sc(
+                emqx_schema:bytesize(),
+                #{
+                    default => "32KB",
+                    desc => ?DESC(cluster_mcast_buffer),
+                    'readOnly' => true
+                }
+            )}
     ];
-
 fields(cluster_dns) ->
-    [ {"name",
-       sc(string(),
-          #{ default => "localhost"
-           })}
-    , {"app",
-       sc(string(),
-          #{ default => "emqx"
-           })}
+    [
+        {"name",
+            sc(
+                string(),
+                #{
+                    default => "localhost",
+                    desc => ?DESC(cluster_dns_name),
+                    'readOnly' => true
+                }
+            )},
+        {"record_type",
+            sc(
+                hoconsc:enum([a, srv]),
+                #{
+                    default => a,
+                    desc => ?DESC(cluster_dns_record_type),
+                    'readOnly' => true
+                }
+            )}
     ];
-
 fields(cluster_etcd) ->
-    [ {"server",
-       sc(emqx_schema:comma_separated_list(),
-          #{})}
-    , {"prefix",
-       sc(string(),
-          #{ default => "emqxcl"
-           })}
-    , {"node_ttl",
-       sc(emqx_schema:duration(),
-          #{ default => "1m"
-           })}
-    , {"ssl",
-       sc(hoconsc:ref(emqx_schema, ssl_client_opts),
-          #{})}
+    [
+        {"server",
+            sc(
+                emqx_schema:comma_separated_list(),
+                #{
+                    desc => ?DESC(cluster_etcd_server),
+                    'readOnly' => true
+                }
+            )},
+        {"prefix",
+            sc(
+                string(),
+                #{
+                    default => "emqxcl",
+                    desc => ?DESC(cluster_etcd_prefix),
+                    'readOnly' => true
+                }
+            )},
+        {"node_ttl",
+            sc(
+                emqx_schema:duration(),
+                #{
+                    default => "1m",
+                    'readOnly' => true,
+                    desc => ?DESC(cluster_etcd_node_ttl)
+                }
+            )},
+        {"ssl",
+            sc(
+                ?R_REF(emqx_schema, "ssl_client_opts"),
+                #{
+                    desc => ?DESC(cluster_etcd_ssl),
+                    'readOnly' => true
+                }
+            )}
     ];
-
 fields(cluster_k8s) ->
-    [ {"apiserver",
-       sc(string(),
-          #{})}
-    , {"service_name",
-       sc(string(),
-          #{ default => "emqx"
-           })}
-    , {"address_type",
-       sc(hoconsc:enum([ip, dns, hostname]),
-          #{})}
-    , {"app_name",
-       sc(string(),
-          #{ default => "emqx"
-           })}
-    , {"namespace",
-       sc(string(),
-          #{ default => "default"
-           })}
-    , {"suffix",
-       sc(string(),
-          #{default => "pod.local"
-           })}
+    [
+        {"apiserver",
+            sc(
+                string(),
+                #{
+                    default => "http://10.110.111.204:8080",
+                    desc => ?DESC(cluster_k8s_apiserver),
+                    'readOnly' => true
+                }
+            )},
+        {"service_name",
+            sc(
+                string(),
+                #{
+                    default => "emqx",
+                    desc => ?DESC(cluster_k8s_service_name),
+                    'readOnly' => true
+                }
+            )},
+        {"address_type",
+            sc(
+                hoconsc:enum([ip, dns, hostname]),
+                #{
+                    default => ip,
+                    desc => ?DESC(cluster_k8s_address_type),
+                    'readOnly' => true
+                }
+            )},
+        {"namespace",
+            sc(
+                string(),
+                #{
+                    default => "default",
+                    desc => ?DESC(cluster_k8s_namespace),
+                    'readOnly' => true
+                }
+            )},
+        {"suffix",
+            sc(
+                string(),
+                #{
+                    default => "pod.local",
+                    'readOnly' => true,
+                    desc => ?DESC(cluster_k8s_suffix)
+                }
+            )}
     ];
-
 fields("node") ->
-    [ {"name",
-       sc(string(),
-          #{ default => "emqx@127.0.0.1"
-           })}
-    , {"cookie",
-       sc(string(),
-          #{ mapping => "vm_args.-setcookie",
-             default => "emqxsecretcookie",
-             sensitive => true
-           })}
-    , {"data_dir",
-       sc(string(),
-          #{ nullable => false,
-             mapping => "emqx.data_dir"
-           })}
-    , {"config_files",
-       sc(list(string()),
-          #{ mapping => "emqx.config_files"
-           , default => undefined
-           })}
-    , {"global_gc_interval",
-       sc(emqx_schema:duration(),
-         #{ mapping => "emqx_machine.global_gc_interval"
-          , default => "15m"
-          })}
-    , {"crash_dump_file",
-       sc(file(),
-          #{ mapping => "vm_args.-env ERL_CRASH_DUMP"
-           , desc => "Location of the crash dump file"
-           })}
-    , {"crash_dump_seconds",
-       sc(emqx_schema:duration_s(),
-          #{ mapping => "vm_args.-env ERL_CRASH_DUMP_SECONDS"
-           , default => "30s"
-           , desc => """
-The number of seconds that the broker is allowed to spend writing
-a crash dump
-"""
-           })}
-    , {"crash_dump_bytes",
-       sc(emqx_schema:bytesize(),
-          #{ mapping => "vm_args.-env ERL_CRASH_DUMP_BYTES"
-           , default => "100MB"
-           , desc => "The maximum size of a crash dump file in bytes."
-           })}
-    , {"dist_net_ticktime",
-       sc(emqx_schema:duration(),
-          #{ mapping => "vm_args.-kernel net_ticktime"
-           , default => "2m"
-           })}
-    , {"dist_listen_min",
-       sc(range(1024, 65535),
-          #{ mapping => "kernel.inet_dist_listen_min"
-           , default => 6369
-           })}
-    , {"dist_listen_max",
-       sc(range(1024, 65535),
-          #{ mapping => "kernel.inet_dist_listen_max"
-           , default => 6369
-           })}
-    , {"backtrace_depth",
-       sc(integer(),
-          #{ mapping => "emqx_machine.backtrace_depth"
-           , default => 23
-           })}
-    , {"applications",
-       sc(emqx_schema:comma_separated_atoms(),
-          #{ mapping => "emqx_machine.applications"
-           , default => []
-           })}
-    , {"etc_dir",
-       sc(string(),
-          #{ desc => "`etc` dir for the node"
-           }
-         )}
-    , {"cluster_call",
-      sc(ref("cluster_call"),
-        #{
-          }
-        )}
+    [
+        {"name",
+            sc(
+                string(),
+                #{
+                    default => "emqx@127.0.0.1",
+                    'readOnly' => true,
+                    desc => ?DESC(node_name)
+                }
+            )},
+        {"cookie",
+            sc(
+                string(),
+                #{
+                    mapping => "vm_args.-setcookie",
+                    required => true,
+                    'readOnly' => true,
+                    sensitive => true,
+                    desc => ?DESC(node_cookie)
+                }
+            )},
+        {"process_limit",
+            sc(
+                range(1024, 134217727),
+                #{
+                    mapping => "vm_args.+P",
+                    desc => ?DESC(process_limit),
+                    default => 2097152,
+                    'readOnly' => true
+                }
+            )},
+        {"max_ports",
+            sc(
+                range(1024, 134217727),
+                #{
+                    mapping => "vm_args.+Q",
+                    desc => ?DESC(max_ports),
+                    default => 1048576,
+                    'readOnly' => true
+                }
+            )},
+        {"dist_buffer_size",
+            sc(
+                range(1, 2097151),
+                #{
+                    mapping => "vm_args.+zdbbl",
+                    desc => ?DESC(dist_buffer_size),
+                    default => 8192,
+                    'readOnly' => true
+                }
+            )},
+        {"max_ets_tables",
+            sc(
+                pos_integer(),
+                #{
+                    mapping => "vm_args.+e",
+                    desc => ?DESC(max_ets_tables),
+                    default => 262144,
+                    'readOnly' => true
+                }
+            )},
+        {"data_dir",
+            sc(
+                string(),
+                #{
+                    required => true,
+                    'readOnly' => true,
+                    mapping => "emqx.data_dir",
+                    desc => ?DESC(node_data_dir)
+                }
+            )},
+        {"config_files",
+            sc(
+                list(string()),
+                #{
+                    mapping => "emqx.config_files",
+                    default => undefined,
+                    'readOnly' => true,
+                    desc => ?DESC(node_config_files)
+                }
+            )},
+        {"global_gc_interval",
+            sc(
+                emqx_schema:duration(),
+                #{
+                    mapping => "emqx_machine.global_gc_interval",
+                    default => "15m",
+                    desc => ?DESC(node_global_gc_interval),
+                    'readOnly' => true
+                }
+            )},
+        {"crash_dump_file",
+            sc(
+                file(),
+                #{
+                    mapping => "vm_args.-env ERL_CRASH_DUMP",
+                    desc => ?DESC(node_crash_dump_file),
+                    default => "log/erl_crash.dump",
+                    'readOnly' => true
+                }
+            )},
+        {"crash_dump_seconds",
+            sc(
+                emqx_schema:duration_s(),
+                #{
+                    mapping => "vm_args.-env ERL_CRASH_DUMP_SECONDS",
+                    default => "30s",
+                    desc => ?DESC(node_crash_dump_seconds),
+                    'readOnly' => true
+                }
+            )},
+        {"crash_dump_bytes",
+            sc(
+                emqx_schema:bytesize(),
+                #{
+                    mapping => "vm_args.-env ERL_CRASH_DUMP_BYTES",
+                    default => "100MB",
+                    desc => ?DESC(node_crash_dump_bytes),
+                    'readOnly' => true
+                }
+            )},
+        {"dist_net_ticktime",
+            sc(
+                emqx_schema:duration_s(),
+                #{
+                    mapping => "vm_args.-kernel net_ticktime",
+                    default => "2m",
+                    'readOnly' => true,
+                    desc => ?DESC(node_dist_net_ticktime)
+                }
+            )},
+        {"backtrace_depth",
+            sc(
+                integer(),
+                #{
+                    mapping => "emqx_machine.backtrace_depth",
+                    default => 23,
+                    'readOnly' => true,
+                    desc => ?DESC(node_backtrace_depth)
+                }
+            )},
+        {"applications",
+            sc(
+                emqx_schema:comma_separated_atoms(),
+                #{
+                    mapping => "emqx_machine.applications",
+                    default => [],
+                    'readOnly' => true,
+                    desc => ?DESC(node_applications)
+                }
+            )},
+        {"etc_dir",
+            sc(
+                string(),
+                #{
+                    desc => ?DESC(node_etc_dir),
+                    'readOnly' => true,
+                    deprecated => {since, "5.0.8"}
+                }
+            )},
+        {"cluster_call",
+            sc(
+                ?R_REF("cluster_call"),
+                #{'readOnly' => true}
+            )},
+        {"db_backend",
+            sc(
+                hoconsc:enum([mnesia, rlog]),
+                #{
+                    mapping => "mria.db_backend",
+                    default => rlog,
+                    'readOnly' => true,
+                    desc => ?DESC(db_backend)
+                }
+            )},
+        {"db_role",
+            sc(
+                hoconsc:enum([core, replicant]),
+                #{
+                    mapping => "mria.node_role",
+                    default => core,
+                    'readOnly' => true,
+                    desc => ?DESC(db_role)
+                }
+            )},
+        {"rpc_module",
+            sc(
+                hoconsc:enum([gen_rpc, rpc]),
+                #{
+                    mapping => "mria.rlog_rpc_module",
+                    default => gen_rpc,
+                    'readOnly' => true,
+                    desc => ?DESC(db_rpc_module)
+                }
+            )},
+        {"tlog_push_mode",
+            sc(
+                hoconsc:enum([sync, async]),
+                #{
+                    mapping => "mria.tlog_push_mode",
+                    default => async,
+                    'readOnly' => true,
+                    desc => ?DESC(db_tlog_push_mode)
+                }
+            )},
+        {"default_shard_transport",
+            sc(
+                hoconsc:enum([gen_rpc, distr]),
+                #{
+                    mapping => "mria.shard_transport",
+                    hidden => true,
+                    default => gen_rpc,
+                    desc => ?DESC(db_default_shard_transport)
+                }
+            )},
+        {"shard_transports",
+            sc(
+                map(shard, hoconsc:enum([gen_rpc, distr])),
+                #{
+                    desc => ?DESC(db_shard_transports),
+                    hidden => true,
+                    mapping => "emqx_machine.custom_shard_transports",
+                    default => #{}
+                }
+            )}
     ];
-
-fields("db") ->
-    [ {"backend",
-       sc(hoconsc:enum([mnesia, rlog]),
-          #{ mapping => "mria.db_backend"
-           , default => mnesia
-           , desc => """
-Select the backend for the embedded database.<br/>
-<code>mnesia</code> is the default backend, that offers decent performance in small clusters.<br/>
-<code>rlog</code> is a new experimental backend that is suitable for very large clusters.
-"""
-           })}
-    , {"role",
-       sc(hoconsc:enum([core, replicant]),
-          #{ mapping => "mria.node_role"
-           , default => core
-           , desc => """
-Select a node role.<br/>
-<code>core</code> nodes provide durability of the data, and take care of writes.
-It is recommended to place core nodes in different racks or different availability zones.<br/>
-<code>replicant</code> nodes are ephemeral worker nodes. Removing them from the cluster
-doesn't affect database redundancy<br/>
-It is recommended to have more replicant nodes than core nodes.<br/>
-Note: this parameter only takes effect when the <code>backend</code> is set
-to <code>rlog</code>.
-"""
-           })}
-    , {"core_nodes",
-       sc(emqx_schema:comma_separated_atoms(),
-          #{ mapping => "mria.core_nodes"
-           , default => []
-           , desc => """
-List of core nodes that the replicant will connect to.<br/>
-Note: this parameter only takes effect when the <code>backend</code> is set
-to <code>rlog</code> and the <code>role</code> is set to <code>replicant</code>.
-"""
-           })}
-    , {"rpc_module",
-       sc(hoconsc:enum([gen_rpc, rpc]),
-          #{ mapping => "mria.rlog_rpc_module"
-           , default => gen_rpc
-           , desc => """
-Protocol used for pushing transaction logs to the replicant nodes.
-"""
-           })}
-    , {"tlog_push_mode",
-       sc(hoconsc:enum([sync, async]),
-          #{ mapping => "mria.tlog_push_mode"
-           , default => async
-           , desc => """
-In sync mode the core node waits for an ack from the replicant nodes before sending the next
-transaction log entry.
-"""
-           })}
-    ];
-
 fields("cluster_call") ->
-    [ {"retry_interval",
-       sc(emqx_schema:duration(),
-         #{ desc => "Time interval to retry after a failed call."
-          , default => "1s"
-          })}
-    , {"max_history",
-       sc(range(1, 500),
-          #{ desc => "Retain the maximum number of completed transactions (for queries)."
-           , default => 100
-           })}
-    , {"cleanup_interval",
-       sc(emqx_schema:duration(),
-          #{ desc =>
-"Time interval to clear completed but stale transactions.
-Ensure that the number of completed transactions is less than the max_history."
-           , default => "5m"
-           })}
+    [
+        {"retry_interval",
+            sc(
+                emqx_schema:duration(),
+                #{
+                    desc => ?DESC(cluster_call_retry_interval),
+                    default => "1m"
+                }
+            )},
+        {"max_history",
+            sc(
+                range(1, 500),
+                #{
+                    desc => ?DESC(cluster_call_max_history),
+                    default => 100
+                }
+            )},
+        {"cleanup_interval",
+            sc(
+                emqx_schema:duration(),
+                #{
+                    desc => ?DESC(cluster_call_cleanup_interval),
+                    default => "5m"
+                }
+            )}
     ];
-
 fields("rpc") ->
-    [ {"mode",
-       sc(hoconsc:enum([sync, async]),
-          #{ default => async
-           , desc => "In <code>sync</code> mode the sending side waits for the ack from the "
-                     "receiving side."
-           })}
-    , {"driver",
-       sc(hoconsc:enum([tcp, ssl]),
-          #{ mapping => "gen_rpc.driver"
-           , default => tcp
-           , desc => "Transport protocol used for inter-broker communication"
-           })}
-    , {"async_batch_size",
-       sc(integer(),
-          #{ mapping => "gen_rpc.max_batch_size"
-           , default => 256
-           , desc => "The maximum number of batch messages sent in asynchronous mode. "
-                     "Note that this configuration does not work in synchronous mode."
-           })}
-    , {"port_discovery",
-       sc(hoconsc:enum([manual, stateless]),
-          #{ mapping => "gen_rpc.port_discovery"
-           , default => stateless
-           , desc => "<code>manual</code>: discover ports by <code>tcp_server_port</code>.<br/>"
-                     "<code>stateless</code>: discover ports in a stateless manner, using the following algorithm. "
-                     "If node name is <code>emqxN@127.0.0.1</code>, where the N is an integer, "
-                     "then the listening port will be 5370 + N."
-           })}
-    , {"tcp_server_port",
-       sc(integer(),
-          #{ mapping => "gen_rpc.tcp_server_port"
-           , default => 5369
-           , desc => "Listening port used by RPC local service.<br/> "
-                     "Note that this config only takes effect when rpc.port_discovery is set to manual."
-           })}
-    , {"ssl_server_port",
-       sc(integer(),
-          #{ mapping => "gen_rpc.ssl_server_port"
-           , default => 5369
-           , desc => "Listening port used by RPC local service.<br/> "
-                     "Note that this config only takes effect when rpc.port_discovery "
-                     "is set to manual and <code>driver</code> is set to <code>ssl</code>."
-           })}
-    , {"tcp_client_num",
-       sc(range(1, 256),
-          #{ default => 1
-           , desc => "Set the maximum number of RPC communication channels initiated by this node "
-                     "to each remote node."
-           })}
-    , {"connect_timeout",
-       sc(emqx_schema:duration(),
-          #{ mapping => "gen_rpc.connect_timeout"
-           , default => "5s"
-           , desc => "Timeout for establishing an RPC connection."
-           })}
-    , {"certfile",
-       sc(file(),
-          #{ mapping => "gen_rpc.certfile"
-           , desc => "Path to TLS certificate file used to validate identity of the cluster nodes. "
-                     "Note that this config only takes effect when <code>rpc.driver</code> "
-                     "is set to <code>ssl</code>."
-           })}
-    , {"keyfile",
-       sc(file(),
-          #{ mapping => "gen_rpc.keyfile"
-           , desc => "Path to the private key file for the <code>rpc.certfile</code>.<br/>"
-                     "Note: contents of this file are secret, so it's necessary to set permissions to 600."
-           })}
-    , {"cacertfile",
-       sc(file(),
-          #{ mapping => "gen_rpc.cacertfile"
-           , desc => "Path to certification authority TLS certificate file used to validate "
-                     "<code>rpc.certfile</code>.<br/>"
-                     "Note: certificates of all nodes in the cluster must be signed by the same CA."
-           })}
-    , {"send_timeout",
-       sc(emqx_schema:duration(),
-          #{ mapping => "gen_rpc.send_timeout"
-           , default => "5s"
-           , desc => "Timeout for sending the RPC request."
-           })}
-    , {"authentication_timeout",
-       sc(emqx_schema:duration(),
-          #{ mapping=> "gen_rpc.authentication_timeout"
-           , default => "5s"
-           , desc => "Timeout for the remote node authentication."
-           })}
-    , {"call_receive_timeout",
-       sc(emqx_schema:duration(),
-          #{ mapping => "gen_rpc.call_receive_timeout"
-           , default => "15s"
-           , desc => "Timeout for the reply to a synchronous RPC."
-           })}
-    , {"socket_keepalive_idle",
-       sc(emqx_schema:duration_s(),
-          #{ mapping => "gen_rpc.socket_keepalive_idle"
-           , default => "7200s"
-           , desc => "How long the connections between the brokers should remain open after the last message is sent."
-           })}
-    , {"socket_keepalive_interval",
-       sc(emqx_schema:duration_s(),
-          #{ mapping => "gen_rpc.socket_keepalive_interval"
-           , default => "75s"
-           , desc => "The interval between keepalive messages."
-           })}
-    , {"socket_keepalive_count",
-       sc(integer(),
-          #{ mapping => "gen_rpc.socket_keepalive_count"
-           , default => 9
-           , desc => "How many times the keepalive probe message can fail to receive a reply "
-                     "until the RPC connection is considered lost."
-           })}
-    , {"socket_sndbuf",
-       sc(emqx_schema:bytesize(),
-          #{ mapping => "gen_rpc.socket_sndbuf"
-           , default => "1MB"
-           , desc => "TCP tuning parameters. TCP sending buffer size."
-           })}
-    , {"socket_recbuf",
-       sc(emqx_schema:bytesize(),
-          #{ mapping => "gen_rpc.socket_recbuf"
-           , default => "1MB"
-           , desc => "TCP tuning parameters. TCP receiving buffer size."
-           })}
-    , {"socket_buffer",
-       sc(emqx_schema:bytesize(),
-          #{ mapping => "gen_rpc.socket_buffer"
-           , default => "1MB"
-           , desc => "TCP tuning parameters. Socket buffer size in user mode."
-           })}
+    [
+        {"mode",
+            sc(
+                hoconsc:enum([sync, async]),
+                #{
+                    default => async,
+                    desc => ?DESC(rpc_mode)
+                }
+            )},
+        {"driver",
+            sc(
+                hoconsc:enum([tcp, ssl]),
+                #{
+                    mapping => "gen_rpc.driver",
+                    default => tcp,
+                    desc => ?DESC(rpc_driver)
+                }
+            )},
+        {"async_batch_size",
+            sc(
+                integer(),
+                #{
+                    mapping => "gen_rpc.max_batch_size",
+                    default => 256,
+                    desc => ?DESC(rpc_async_batch_size)
+                }
+            )},
+        {"port_discovery",
+            sc(
+                hoconsc:enum([manual, stateless]),
+                #{
+                    mapping => "gen_rpc.port_discovery",
+                    default => stateless,
+                    desc => ?DESC(rpc_port_discovery)
+                }
+            )},
+        {"tcp_server_port",
+            sc(
+                integer(),
+                #{
+                    mapping => "gen_rpc.tcp_server_port",
+                    default => 5369,
+                    desc => ?DESC(rpc_tcp_server_port)
+                }
+            )},
+        {"ssl_server_port",
+            sc(
+                integer(),
+                #{
+                    mapping => "gen_rpc.ssl_server_port",
+                    default => 5369,
+                    desc => ?DESC(rpc_ssl_server_port)
+                }
+            )},
+        {"tcp_client_num",
+            sc(
+                range(1, 256),
+                #{
+                    default => 10,
+                    desc => ?DESC(rpc_tcp_client_num)
+                }
+            )},
+        {"connect_timeout",
+            sc(
+                emqx_schema:duration(),
+                #{
+                    mapping => "gen_rpc.connect_timeout",
+                    default => "5s",
+                    desc => ?DESC(rpc_connect_timeout)
+                }
+            )},
+        {"certfile",
+            sc(
+                file(),
+                #{
+                    mapping => "gen_rpc.certfile",
+                    desc => ?DESC(rpc_certfile)
+                }
+            )},
+        {"keyfile",
+            sc(
+                file(),
+                #{
+                    mapping => "gen_rpc.keyfile",
+                    desc => ?DESC(rpc_keyfile)
+                }
+            )},
+        {"cacertfile",
+            sc(
+                file(),
+                #{
+                    mapping => "gen_rpc.cacertfile",
+                    desc => ?DESC(rpc_cacertfile)
+                }
+            )},
+        {"send_timeout",
+            sc(
+                emqx_schema:duration(),
+                #{
+                    mapping => "gen_rpc.send_timeout",
+                    default => "5s",
+                    desc => ?DESC(rpc_send_timeout)
+                }
+            )},
+        {"authentication_timeout",
+            sc(
+                emqx_schema:duration(),
+                #{
+                    mapping => "gen_rpc.authentication_timeout",
+                    default => "5s",
+                    desc => ?DESC(rpc_authentication_timeout)
+                }
+            )},
+        {"call_receive_timeout",
+            sc(
+                emqx_schema:duration(),
+                #{
+                    mapping => "gen_rpc.call_receive_timeout",
+                    default => "15s",
+                    desc => ?DESC(rpc_call_receive_timeout)
+                }
+            )},
+        {"socket_keepalive_idle",
+            sc(
+                emqx_schema:duration_s(),
+                #{
+                    mapping => "gen_rpc.socket_keepalive_idle",
+                    default => "15m",
+                    desc => ?DESC(rpc_socket_keepalive_idle)
+                }
+            )},
+        {"socket_keepalive_interval",
+            sc(
+                emqx_schema:duration_s(),
+                #{
+                    mapping => "gen_rpc.socket_keepalive_interval",
+                    default => "75s",
+                    desc => ?DESC(rpc_socket_keepalive_interval)
+                }
+            )},
+        {"socket_keepalive_count",
+            sc(
+                integer(),
+                #{
+                    mapping => "gen_rpc.socket_keepalive_count",
+                    default => 9,
+                    desc => ?DESC(rpc_socket_keepalive_count)
+                }
+            )},
+        {"socket_sndbuf",
+            sc(
+                emqx_schema:bytesize(),
+                #{
+                    mapping => "gen_rpc.socket_sndbuf",
+                    default => "1MB",
+                    desc => ?DESC(rpc_socket_sndbuf)
+                }
+            )},
+        {"socket_recbuf",
+            sc(
+                emqx_schema:bytesize(),
+                #{
+                    mapping => "gen_rpc.socket_recbuf",
+                    default => "1MB",
+                    desc => ?DESC(rpc_socket_recbuf)
+                }
+            )},
+        {"socket_buffer",
+            sc(
+                emqx_schema:bytesize(),
+                #{
+                    mapping => "gen_rpc.socket_buffer",
+                    default => "1MB",
+                    desc => ?DESC(rpc_socket_buffer)
+                }
+            )}
     ];
-
 fields("log") ->
-    [ {"console_handler", ref("console_handler")}
-    , {"file_handlers",
-       sc(map(name, ref("log_file_handler")),
-          #{})}
-    , {"error_logger",
-       sc(atom(),
-          #{mapping => "kernel.error_logger",
-            default => silent})}
+    [
+        {"console_handler", ?R_REF("console_handler")},
+        {"file_handlers",
+            sc(
+                map(name, ?R_REF("log_file_handler")),
+                #{desc => ?DESC("log_file_handlers")}
+            )}
     ];
-
 fields("console_handler") ->
-    [ {"enable",
-       sc(boolean(),
-          #{ default => false
-           })}
-    ] ++ log_handler_common_confs();
-
+    log_handler_common_confs(false);
 fields("log_file_handler") ->
-    [ {"file",
-       sc(file(),
-          #{})}
-    , {"rotation",
-       sc(ref("log_rotation"),
-          #{})}
-    , {"max_size",
-       sc(hoconsc:union([infinity, emqx_schema:bytesize()]),
-          #{ default => "10MB"
-           })}
-    ] ++ log_handler_common_confs();
-
+    [
+        {"file",
+            sc(
+                file(),
+                #{
+                    desc => ?DESC("log_file_handler_file"),
+                    validator => fun validate_file_location/1
+                }
+            )},
+        {"rotation",
+            sc(
+                ?R_REF("log_rotation"),
+                #{}
+            )},
+        {"max_size",
+            sc(
+                hoconsc:union([infinity, emqx_schema:bytesize()]),
+                #{
+                    default => "50MB",
+                    desc => ?DESC("log_file_handler_max_size")
+                }
+            )}
+    ] ++ log_handler_common_confs(true);
 fields("log_rotation") ->
-    [ {"enable",
-       sc(boolean(),
-          #{ default => true
-           })}
-    , {"count",
-       sc(range(1, 2048),
-          #{ default => 10
-           })}
+    [
+        {"enable",
+            sc(
+                boolean(),
+                #{
+                    default => true,
+                    desc => ?DESC("log_rotation_enable")
+                }
+            )},
+        {"count",
+            sc(
+                range(1, 2048),
+                #{
+                    default => 10,
+                    desc => ?DESC("log_rotation_count")
+                }
+            )}
     ];
-
 fields("log_overload_kill") ->
-    [ {"enable",
-       sc(boolean(),
-          #{ default => true
-           })}
-    , {"mem_size",
-       sc(emqx_schema:bytesize(),
-          #{ default => "30MB"
-           })}
-    , {"qlen",
-       sc(integer(),
-          #{ default => 20000
-           })}
-    , {"restart_after",
-       sc(hoconsc:union([emqx_schema:duration(), infinity]),
-          #{ default => "5s"
-           })}
+    [
+        {"enable",
+            sc(
+                boolean(),
+                #{
+                    default => true,
+                    desc => ?DESC("log_overload_kill_enable")
+                }
+            )},
+        {"mem_size",
+            sc(
+                emqx_schema:bytesize(),
+                #{
+                    default => "30MB",
+                    desc => ?DESC("log_overload_kill_mem_size")
+                }
+            )},
+        {"qlen",
+            sc(
+                pos_integer(),
+                #{
+                    default => 20000,
+                    desc => ?DESC("log_overload_kill_qlen")
+                }
+            )},
+        {"restart_after",
+            sc(
+                hoconsc:union([emqx_schema:duration_ms(), infinity]),
+                #{
+                    default => "5s",
+                    desc => ?DESC("log_overload_kill_restart_after")
+                }
+            )}
     ];
-
 fields("log_burst_limit") ->
-    [ {"enable",
-       sc(boolean(),
-          #{ default => true
-           })}
-    , {"max_count",
-       sc(integer(),
-          #{ default => 10000
-           })}
-    , {"window_time",
-       sc(emqx_schema:duration(),
-          #{default => "1s"})}
+    [
+        {"enable",
+            sc(
+                boolean(),
+                #{
+                    default => true,
+                    desc => ?DESC("log_burst_limit_enable")
+                }
+            )},
+        {"max_count",
+            sc(
+                pos_integer(),
+                #{
+                    default => 10000,
+                    desc => ?DESC("log_burst_limit_max_count")
+                }
+            )},
+        {"window_time",
+            sc(
+                emqx_schema:duration(),
+                #{
+                    default => "1s",
+                    desc => ?DESC("log_burst_limit_window_time")
+                }
+            )}
     ];
-
 fields("authorization") ->
     emqx_schema:fields("authorization") ++
-    emqx_authz_schema:fields("authorization").
+        emqx_authz_schema:fields("authorization").
+
+desc("cluster") ->
+    ?DESC("desc_cluster");
+desc(cluster_static) ->
+    ?DESC("desc_cluster_static");
+desc(cluster_mcast) ->
+    ?DESC("desc_cluster_mcast");
+desc(cluster_dns) ->
+    ?DESC("desc_cluster_dns");
+desc(cluster_etcd) ->
+    ?DESC("desc_cluster_etcd");
+desc(cluster_k8s) ->
+    ?DESC("desc_cluster_k8s");
+desc("node") ->
+    ?DESC("desc_node");
+desc("cluster_call") ->
+    ?DESC("desc_cluster_call");
+desc("rpc") ->
+    ?DESC("desc_rpc");
+desc("log") ->
+    ?DESC("desc_log");
+desc("console_handler") ->
+    ?DESC("desc_console_handler");
+desc("log_file_handler") ->
+    ?DESC("desc_log_file_handler");
+desc("log_rotation") ->
+    ?DESC("desc_log_rotation");
+desc("log_overload_kill") ->
+    ?DESC("desc_log_overload_kill");
+desc("log_burst_limit") ->
+    ?DESC("desc_log_burst_limit");
+desc("authorization") ->
+    ?DESC("desc_authorization");
+desc(_) ->
+    undefined.
 
 translations() -> ["ekka", "kernel", "emqx", "gen_rpc"].
 
 translation("ekka") ->
-    [ {"cluster_discovery", fun tr_cluster_discovery/1}];
+    [{"cluster_discovery", fun tr_cluster_discovery/1}];
 translation("kernel") ->
-    [ {"logger_level", fun tr_logger_level/1}
-    , {"logger", fun tr_logger/1}];
+    [
+        {"logger_level", fun tr_logger_level/1},
+        {"logger", fun tr_logger/1},
+        {"error_logger", fun(_) -> silent end}
+    ];
 translation("emqx") ->
-    [ {"config_files", fun tr_config_files/1}
-    , {"cluster_override_conf_file", fun tr_cluster_override_conf_file/1}
-    , {"local_override_conf_file", fun tr_local_override_conf_file/1}
+    [
+        {"config_files", fun tr_config_files/1},
+        {"cluster_override_conf_file", fun tr_cluster_override_conf_file/1},
+        {"local_override_conf_file", fun tr_local_override_conf_file/1}
     ];
 translation("gen_rpc") ->
-    [ {"default_client_driver", fun tr_default_config_driver/1}
-    ].
+    [{"default_client_driver", fun tr_default_config_driver/1}].
 
 tr_default_config_driver(Conf) ->
     conf_get("rpc.driver", Conf).
@@ -634,7 +998,7 @@ tr_config_files(Conf) ->
         [_ | _] = Files ->
             Files;
         _ ->
-            case os:getenv("RUNNER_ETC_DIR") of
+            case os:getenv("EMQX_ETC_DIR") of
                 false ->
                     [filename:join([code:lib_dir(emqx), "etc", "emqx.conf"])];
                 Dir ->
@@ -656,17 +1020,32 @@ tr_override_conf_file(Conf, Filename) ->
 
 tr_cluster_discovery(Conf) ->
     Strategy = conf_get("cluster.discovery_strategy", Conf),
-    {Strategy, filter(options(Strategy, Conf))}.
+    {Strategy, filter(cluster_options(Strategy, Conf))}.
 
+-spec tr_logger_level(hocon:config()) -> logger:level().
 tr_logger_level(Conf) ->
     ConsoleLevel = conf_get("log.console_handler.level", Conf, undefined),
-    FileLevels = [conf_get("level", SubConf) || {_, SubConf}
-                    <- maps:to_list(conf_get("log.file_handlers", Conf, #{}))],
+    FileLevels = [
+        conf_get("level", SubConf)
+     || {_, SubConf} <-
+            logger_file_handlers(Conf)
+    ],
     case FileLevels ++ [ConsoleLevel || ConsoleLevel =/= undefined] of
-        [] -> warning; %% warning is the default level we should use
-        Levels ->
-            least_severe_log_level(Levels)
+        %% warning is the default level we should use
+        [] -> warning;
+        Levels -> least_severe_log_level(Levels)
     end.
+
+logger_file_handlers(Conf) ->
+    Handlers = maps:to_list(conf_get("log.file_handlers", Conf, #{})),
+    lists:filter(
+        fun({_Name, Opts}) ->
+            B = conf_get("enable", Opts),
+            true = is_boolean(B),
+            B
+        end,
+        Handlers
+    ).
 
 tr_logger(Conf) ->
     %% For the default logger that outputs to console
@@ -674,93 +1053,135 @@ tr_logger(Conf) ->
         case conf_get("log.console_handler.enable", Conf) of
             true ->
                 ConsoleConf = conf_get("log.console_handler", Conf),
-                [{handler, console, logger_std_h, #{
-                    level => conf_get("log.console_handler.level", Conf),
-                    config => (log_handler_conf(ConsoleConf)) #{type => standard_io},
-                    formatter => log_formatter(ConsoleConf),
-                    filters => log_filter(ConsoleConf)
-                }}];
-            false -> []
+                [
+                    {handler, console, logger_std_h, #{
+                        level => conf_get("log.console_handler.level", Conf),
+                        config => (log_handler_conf(ConsoleConf))#{type => standard_io},
+                        formatter => log_formatter(ConsoleConf),
+                        filters => log_filter(ConsoleConf)
+                    }}
+                ];
+            false ->
+                []
         end,
     %% For the file logger
     FileHandlers =
-        [begin
-         {handler, binary_to_atom(HandlerName, latin1), logger_disk_log_h, #{
-                level => conf_get("level", SubConf),
-                config => (log_handler_conf(SubConf)) #{
-                    type => case conf_get("rotation.enable", SubConf) of
+        [
+            begin
+                {handler, to_atom(HandlerName), logger_disk_log_h, #{
+                    level => conf_get("level", SubConf),
+                    config => (log_handler_conf(SubConf))#{
+                        type =>
+                            case conf_get("rotation.enable", SubConf) of
                                 true -> wrap;
                                 _ -> halt
                             end,
-                    file => conf_get("file", SubConf),
-                    max_no_files => conf_get("rotation.count", SubConf),
-                    max_no_bytes => conf_get("max_size", SubConf)
-                },
-                formatter => log_formatter(SubConf),
-                filters => log_filter(SubConf),
-                filesync_repeat_interval => no_repeat
-            }}
-        end || {HandlerName, SubConf} <- maps:to_list(conf_get("log.file_handlers", Conf, #{}))],
-
+                        file => conf_get("file", SubConf),
+                        max_no_files => conf_get("rotation.count", SubConf),
+                        max_no_bytes => conf_get("max_size", SubConf)
+                    },
+                    formatter => log_formatter(SubConf),
+                    filters => log_filter(SubConf),
+                    filesync_repeat_interval => no_repeat
+                }}
+            end
+         || {HandlerName, SubConf} <- logger_file_handlers(Conf)
+        ],
     [{handler, default, undefined}] ++ ConsoleHandler ++ FileHandlers.
 
-log_handler_common_confs() ->
-    [ {"level",
-       sc(log_level(),
-          #{ default => warning
-           , desc => "Global log level. This includes the primary log level "
-                     "and all log handlers."
-           })}
-    , {"time_offset",
-       sc(string(),
-          #{ default => "system"
-           })}
-    , {"chars_limit",
-       sc(hoconsc:union([unlimited, range(1, inf)]),
-          #{ default => unlimited
-           , desc => "Set the maximum length of a single log message. "
-                     "If this length is exceeded, the log message will be truncated."
-           })}
-    , {"formatter",
-       sc(hoconsc:enum([text, json]),
-          #{ default => text
-           , desc => "Choose log format. <code>text</code> for free text, and "
-                     "<code>json</code> for structured logging."
-           })}
-    , {"single_line",
-       sc(boolean(),
-          #{ default => true
-           , desc => "Print logs in a single line if set to true. "
-                     "Otherwise, log messages may span multiple lines."
-           })}
-    , {"sync_mode_qlen",
-       sc(integer(),
-          #{ default => 100
-           })}
-    , {"drop_mode_qlen",
-       sc(integer(),
-          #{ default => 3000
-           })}
-    , {"flush_qlen",
-       sc(integer(),
-          #{ default => 8000
-           })}
-    , {"overload_kill",
-       sc(ref("log_overload_kill"),
-          #{})}
-    , {"burst_limit",
-       sc(ref("log_burst_limit"),
-          #{})}
-    , {"supervisor_reports",
-       sc(hoconsc:enum([error, progress]),
-          #{ default => error
-           })}
-    , {"max_depth",
-       sc(hoconsc:union([unlimited, integer()]),
-          #{ default => 100
-           , desc => "Maximum depth for Erlang term log formatting "
-                     "and Erlang process message queue inspection."
-           })}
+log_handler_common_confs(Enable) ->
+    [
+        {"enable",
+            sc(
+                boolean(),
+                #{
+                    default => Enable,
+                    desc => ?DESC("common_handler_enable")
+                }
+            )},
+        {"level",
+            sc(
+                log_level(),
+                #{
+                    default => warning,
+                    desc => ?DESC("common_handler_level")
+                }
+            )},
+        {"time_offset",
+            sc(
+                string(),
+                #{
+                    default => "system",
+                    desc => ?DESC("common_handler_time_offset"),
+                    validator => fun validate_time_offset/1
+                }
+            )},
+        {"chars_limit",
+            sc(
+                hoconsc:union([unlimited, range(100, inf)]),
+                #{
+                    default => unlimited,
+                    desc => ?DESC("common_handler_chars_limit")
+                }
+            )},
+        {"formatter",
+            sc(
+                hoconsc:enum([text, json]),
+                #{
+                    default => text,
+                    desc => ?DESC("common_handler_formatter")
+                }
+            )},
+        {"single_line",
+            sc(
+                boolean(),
+                #{
+                    default => true,
+                    desc => ?DESC("common_handler_single_line")
+                }
+            )},
+        {"sync_mode_qlen",
+            sc(
+                non_neg_integer(),
+                #{
+                    default => 100,
+                    desc => ?DESC("common_handler_sync_mode_qlen")
+                }
+            )},
+        {"drop_mode_qlen",
+            sc(
+                pos_integer(),
+                #{
+                    default => 3000,
+                    desc => ?DESC("common_handler_drop_mode_qlen")
+                }
+            )},
+        {"flush_qlen",
+            sc(
+                pos_integer(),
+                #{
+                    default => 8000,
+                    desc => ?DESC("common_handler_flush_qlen")
+                }
+            )},
+        {"overload_kill", sc(?R_REF("log_overload_kill"), #{})},
+        {"burst_limit", sc(?R_REF("log_burst_limit"), #{})},
+        {"supervisor_reports",
+            sc(
+                hoconsc:enum([error, progress]),
+                #{
+                    default => error,
+                    desc => ?DESC("common_handler_supervisor_reports")
+                }
+            )},
+        {"max_depth",
+            sc(
+                hoconsc:union([unlimited, non_neg_integer()]),
+                #{
+                    default => 100,
+                    desc => ?DESC("common_handler_max_depth")
+                }
+            )}
     ].
 
 log_handler_conf(Conf) ->
@@ -783,35 +1204,37 @@ log_handler_conf(Conf) ->
     }.
 
 log_formatter(Conf) ->
-    CharsLimit = case conf_get("chars_limit", Conf) of
-        unlimited -> unlimited;
-        V when V > 0 -> V
-    end,
-    TimeOffSet = case conf_get("time_offset", Conf) of
-        "system" -> "";
-        "utc" -> 0;
-        OffSetStr -> OffSetStr
-    end,
+    CharsLimit =
+        case conf_get("chars_limit", Conf) of
+            unlimited -> unlimited;
+            V when V > 0 -> V
+        end,
+    TimeOffSet =
+        case conf_get("time_offset", Conf) of
+            "system" -> "";
+            "utc" -> 0;
+            OffSetStr -> OffSetStr
+        end,
     SingleLine = conf_get("single_line", Conf),
     Depth = conf_get("max_depth", Conf),
     do_formatter(conf_get("formatter", Conf), CharsLimit, SingleLine, TimeOffSet, Depth).
 
 %% helpers
 do_formatter(json, CharsLimit, SingleLine, TimeOffSet, Depth) ->
-    {emqx_logger_jsonfmt,
-        #{chars_limit => CharsLimit,
-          single_line => SingleLine,
-          time_offset => TimeOffSet,
-          depth => Depth
-        }};
+    {emqx_logger_jsonfmt, #{
+        chars_limit => CharsLimit,
+        single_line => SingleLine,
+        time_offset => TimeOffSet,
+        depth => Depth
+    }};
 do_formatter(text, CharsLimit, SingleLine, TimeOffSet, Depth) ->
-    {emqx_logger_textfmt,
-        #{template => [time," [",level,"] ", msg,"\n"],
-          chars_limit => CharsLimit,
-          single_line => SingleLine,
-          time_offset => TimeOffSet,
-          depth => Depth
-        }}.
+    {emqx_logger_textfmt, #{
+        template => [time, " [", level, "] ", msg, "\n"],
+        chars_limit => CharsLimit,
+        single_line => SingleLine,
+        time_offset => TimeOffSet,
+        depth => Depth
+    }}.
 
 log_filter(Conf) ->
     case conf_get("supervisor_reports", Conf) of
@@ -823,15 +1246,18 @@ least_severe_log_level(Levels) ->
     hd(sort_log_levels(Levels)).
 
 sort_log_levels(Levels) ->
-    lists:sort(fun(A, B) ->
+    lists:sort(
+        fun(A, B) ->
             case logger:compare_levels(A, B) of
                 R when R == lt; R == eq -> true;
                 gt -> false
             end
-        end, Levels).
+        end,
+        Levels
+    ).
 
 %% utils
--spec(conf_get(string() | [string()], hocon:config()) -> term()).
+-spec conf_get(string() | [string()], hocon:config()) -> term().
 conf_get(Key, Conf) ->
     ensure_list(hocon_maps:get(Key, Conf)).
 
@@ -842,7 +1268,7 @@ filter(Opts) ->
     [{K, V} || {K, V} <- Opts, V =/= undefined].
 
 %% @private return a list of keys in a parent field
--spec(keys(string(), hocon:config()) -> [string()]).
+-spec keys(string(), hocon:config()) -> [string()].
 keys(Parent, Conf) ->
     [binary_to_list(B) || B <- maps:keys(conf_get(Parent, Conf, #{}))].
 
@@ -852,37 +1278,45 @@ sc(Type, Meta) -> hoconsc:mk(Type, Meta).
 
 map(Name, Type) -> hoconsc:map(Name, Type).
 
-ref(Field) -> hoconsc:ref(?MODULE, Field).
-
-options(static, Conf) ->
+cluster_options(static, Conf) ->
     [{seeds, conf_get("cluster.static.seeds", Conf, [])}];
-options(mcast, Conf) ->
+cluster_options(mcast, Conf) ->
     {ok, Addr} = inet:parse_address(conf_get("cluster.mcast.addr", Conf)),
     {ok, Iface} = inet:parse_address(conf_get("cluster.mcast.iface", Conf)),
     Ports = conf_get("cluster.mcast.ports", Conf),
-    [{addr, Addr}, {ports, Ports}, {iface, Iface},
-     {ttl, conf_get("cluster.mcast.ttl", Conf, 1)},
-     {loop, conf_get("cluster.mcast.loop", Conf, true)}];
-options(dns, Conf) ->
-    [{name, conf_get("cluster.dns.name", Conf)},
-     {app, conf_get("cluster.dns.app", Conf)}];
-options(etcd, Conf) ->
+    [
+        {addr, Addr},
+        {ports, Ports},
+        {iface, Iface},
+        {ttl, conf_get("cluster.mcast.ttl", Conf, 1)},
+        {loop, conf_get("cluster.mcast.loop", Conf, true)}
+    ];
+cluster_options(dns, Conf) ->
+    [
+        {name, conf_get("cluster.dns.name", Conf)},
+        {type, conf_get("cluster.dns.record_type", Conf)}
+    ];
+cluster_options(etcd, Conf) ->
     Namespace = "cluster.etcd.ssl",
     SslOpts = fun(C) ->
         Options = keys(Namespace, C),
-        lists:map(fun(Key) -> {to_atom(Key), conf_get([Namespace, Key], Conf)} end, Options) end,
-    [{server, conf_get("cluster.etcd.server", Conf)},
-     {prefix, conf_get("cluster.etcd.prefix", Conf, "emqxcl")},
-     {node_ttl, conf_get("cluster.etcd.node_ttl", Conf, 60)},
-     {ssl_options, filter(SslOpts(Conf))}];
-options(k8s, Conf) ->
-    [{apiserver, conf_get("cluster.k8s.apiserver", Conf)},
-     {service_name, conf_get("cluster.k8s.service_name", Conf)},
-     {address_type, conf_get("cluster.k8s.address_type", Conf, ip)},
-     {app_name, conf_get("cluster.k8s.app_name", Conf)},
-     {namespace, conf_get("cluster.k8s.namespace", Conf)},
-     {suffix, conf_get("cluster.k8s.suffix", Conf, "")}];
-options(manual, _Conf) ->
+        lists:map(fun(Key) -> {to_atom(Key), conf_get([Namespace, Key], Conf)} end, Options)
+    end,
+    [
+        {server, conf_get("cluster.etcd.server", Conf)},
+        {prefix, conf_get("cluster.etcd.prefix", Conf, "emqxcl")},
+        {node_ttl, conf_get("cluster.etcd.node_ttl", Conf, 60)},
+        {ssl_options, filter(SslOpts(Conf))}
+    ];
+cluster_options(k8s, Conf) ->
+    [
+        {apiserver, conf_get("cluster.k8s.apiserver", Conf)},
+        {service_name, conf_get("cluster.k8s.service_name", Conf)},
+        {address_type, conf_get("cluster.k8s.address_type", Conf, ip)},
+        {namespace, conf_get("cluster.k8s.namespace", Conf)},
+        {suffix, conf_get("cluster.k8s.suffix", Conf, "")}
+    ];
+cluster_options(manual, _Conf) ->
     [].
 
 to_atom(Atom) when is_atom(Atom) ->
@@ -908,17 +1342,30 @@ roots(Module) ->
 %% module, this function replaces the root filed "authorization" with a new schema
 emqx_schema_high_prio_roots() ->
     Roots = emqx_schema:roots(high),
-    Authz = {"authorization",
-             sc(hoconsc:ref("authorization"),
-             #{ desc => """
-Authorization a.k.a ACL.<br>
-In EMQ X, MQTT client access control is extremely flexible.<br>
-An out of the box set of authorization data sources are supported.
-For example,<br>
-'file' source is to support concise and yet generic ACL rules in a file;<br>
-'built-in-database' source can be used to store per-client customizable rule sets,
-natively in the EMQ X node;<br>
-'http' source to make EMQ X call an external HTTP API to make the decision;<br>
-'PostgreSQL' etc. to look up clients or rules from external databases;<br>
-""" })},
+    Authz =
+        {"authorization",
+            sc(
+                ?R_REF("authorization"),
+                #{desc => ?DESC(authorization)}
+            )},
     lists:keyreplace("authorization", 1, Roots, Authz).
+
+validate_file_location(File) ->
+    ValidFile = "^[/\\_a-zA-Z0-9\\.\\-]*$",
+    Error = "Invalid file name: " ++ ValidFile,
+    validator_string_re(File, ValidFile, Error).
+
+validate_time_offset(Offset) ->
+    ValidTimeOffset = "^([\\-\\+][0-1][0-9]:[0-6][0-9]|system|utc)$",
+    Error =
+        "Invalid time offset, should be of format: +[hh]:[mm], "
+        "i.e. +08:00 or -02:00",
+    validator_string_re(Offset, ValidTimeOffset, Error).
+
+validator_string_re(Val, RE, Error) ->
+    try re:run(Val, RE) of
+        nomatch -> {error, Error};
+        _ -> ok
+    catch
+        _:_ -> {error, Error}
+    end.

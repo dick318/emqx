@@ -15,22 +15,52 @@
 %%--------------------------------------------------------------------
 -module(emqx_prometheus_schema).
 
+-include_lib("hocon/include/hoconsc.hrl").
 -include_lib("typerefl/include/types.hrl").
 
 -behaviour(hocon_schema).
 
--export([ namespace/0
-        , roots/0
-        , fields/1]).
+-export([
+    namespace/0,
+    roots/0,
+    fields/1,
+    desc/1
+]).
 
 namespace() -> "prometheus".
 
 roots() -> ["prometheus"].
 
 fields("prometheus") ->
-    [ {push_gateway_server, sc(string(), #{default => "http://127.0.0.1:9091", nullabel => false})}
-    , {interval, sc(emqx_schema:duration_ms(), #{default => "15s", nullabel => false})}
-    , {enable, sc(boolean(), #{default => false, nullabel => false})}
+    [
+        {push_gateway_server,
+            ?HOCON(
+                string(),
+                #{
+                    default => "http://127.0.0.1:9091",
+                    required => true,
+                    desc => ?DESC(push_gateway_server)
+                }
+            )},
+        {interval,
+            ?HOCON(
+                emqx_schema:duration_ms(),
+                #{
+                    default => "15s",
+                    required => true,
+                    desc => ?DESC(interval)
+                }
+            )},
+        {enable,
+            ?HOCON(
+                boolean(),
+                #{
+                    default => false,
+                    required => true,
+                    desc => ?DESC(enable)
+                }
+            )}
     ].
 
-sc(Type, Meta) -> hoconsc:mk(Type, Meta).
+desc("prometheus") -> ?DESC(prometheus);
+desc(_) -> undefined.

@@ -24,8 +24,13 @@
 -define(USERNAME, <<"api_username">>).
 
 %% notice: integer topic for sort response
--define(TOPIC1, <<"/t/0000">>).
--define(TOPIC2, <<"/t/0001">>).
+-define(TOPIC1, <<"t/0000">>).
+-define(TOPIC1RH, 1).
+-define(TOPIC1RAP, false).
+-define(TOPIC1NL, false).
+-define(TOPIC1QOS, 1).
+-define(TOPIC2, <<"$share/test_group/t/0001">>).
+-define(TOPIC2_TOPIC_ONLY, <<"t/0001">>).
 
 -define(TOPIC_SORT, #{?TOPIC1 => 1, ?TOPIC2 => 2}).
 
@@ -40,9 +45,13 @@ end_per_suite(_) ->
     emqx_mgmt_api_test_util:end_suite().
 
 t_subscription_api(_) ->
-    {ok, Client} = emqtt:start_link(#{username => ?USERNAME, clientid => ?CLIENTID}),
+    {ok, Client} = emqtt:start_link(#{username => ?USERNAME, clientid => ?CLIENTID, proto_ver => v5}),
     {ok, _} = emqtt:connect(Client),
-    {ok, _, _} = emqtt:subscribe(Client, ?TOPIC1),
+    {ok, _, _} = emqtt:subscribe(
+        Client, [
+            {?TOPIC1, [{rh, ?TOPIC1RH}, {rap, ?TOPIC1RAP}, {nl, ?TOPIC1NL}, {qos, ?TOPIC1QOS}]}
+        ]
+    ),
     {ok, _, _} = emqtt:subscribe(Client, ?TOPIC2),
     Path = emqx_mgmt_api_test_util:api_path(["subscriptions"]),
     {ok, Response} = emqx_mgmt_api_test_util:request_api(get, Path),
@@ -57,22 +66,56 @@ t_subscription_api(_) ->
         fun(#{<<"topic">> := T1}, #{<<"topic">> := T2}) ->
             maps:get(T1, ?TOPIC_SORT) =< maps:get(T2, ?TOPIC_SORT)
         end,
-    [Subscriptions1, Subscriptions2]  = lists:sort(Sort, Subscriptions),
-    ?assertEqual(maps:get(<<"topic">>, Subscriptions1), ?TOPIC1),
+    [Subscriptions1, Subscriptions2] = lists:sort(Sort, Subscriptions),
+
+    ?assertMatch(
+        #{
+            <<"topic">> := ?TOPIC1,
+            <<"qos">> := ?TOPIC1QOS,
+            <<"nl">> := _,
+            <<"rap">> := _,
+            <<"rh">> := ?TOPIC1RH,
+            <<"clientid">> := ?CLIENTID,
+            <<"node">> := _
+        },
+        Subscriptions1
+    ),
+
     ?assertEqual(maps:get(<<"topic">>, Subscriptions2), ?TOPIC2),
-    ?assertEqual(maps:get(<<"clientid">>, Subscriptions1), ?CLIENTID),
     ?assertEqual(maps:get(<<"clientid">>, Subscriptions2), ?CLIENTID),
 
-    QsTopic = "topic=" ++ <<"%2Ft%2F0001">>,
+    QS = uri_string:compose_query([
+        {"clientid", ?CLIENTID},
+        {"topic", ?TOPIC2_TOPIC_ONLY},
+        {"node", atom_to_list(node())},
+        {"qos", "0"},
+        {"share_group", "test_group"},
+        {"match_topic", "t/#"}
+    ]),
     Headers = emqx_mgmt_api_test_util:auth_header_(),
-    {ok, ResponseTopic1} = emqx_mgmt_api_test_util:request_api(get, Path, QsTopic, Headers),
-    DataTopic1 = emqx_json:decode(ResponseTopic1, [return_maps]),
-    Meta1 = maps:get(<<"meta">>, DataTopic1),
-    ?assertEqual(1, maps:get(<<"page">>, Meta1)),
-    ?assertEqual(emqx_mgmt:max_row_limit(), maps:get(<<"limit">>, Meta1)),
-    ?assertEqual(1, maps:get(<<"count">>, Meta1)),
-    Subscriptions_qs1 = maps:get(<<"data">>, DataTopic1),
-    ?assertEqual(length(Subscriptions_qs1), 1),
+    {ok, ResponseTopic2} = emqx_mgmt_api_test_util:request_api(get, Path, QS, Headers),
+    DataTopic2 = emqx_json:decode(ResponseTopic2, [return_maps]),
+    Meta2 = maps:get(<<"meta">>, DataTopic2),
+    ?assertEqual(1, maps:get(<<"page">>, Meta2)),
+    ?assertEqual(emqx_mgmt:max_row_limit(), maps:get(<<"limit">>, Meta2)),
+    ?assertEqual(1, maps:get(<<"count">>, Meta2)),
+    SubscriptionsList2 = maps:get(<<"data">>, DataTopic2),
+    ?assertEqual(length(SubscriptionsList2), 1),
 
+    MatchQs = uri_string:compose_query([
+        {"clientid", ?CLIENTID},
+        {"node", atom_to_list(node())},
+        {"qos", "0"},
+        {"match_topic", "t/#"}
+    ]),
+
+    {ok, MatchRes} = emqx_mgmt_api_test_util:request_api(get, Path, MatchQs, Headers),
+    MatchData = emqx_json:decode(MatchRes, [return_maps]),
+    MatchMeta = maps:get(<<"meta">>, MatchData),
+    ?assertEqual(1, maps:get(<<"page">>, MatchMeta)),
+    ?assertEqual(emqx_mgmt:max_row_limit(), maps:get(<<"limit">>, MatchMeta)),
+    ?assertEqual(1, maps:get(<<"count">>, MatchMeta)),
+    MatchSubs = maps:get(<<"data">>, MatchData),
+    ?assertEqual(1, length(MatchSubs)),
 
     emqtt:disconnect(Client).

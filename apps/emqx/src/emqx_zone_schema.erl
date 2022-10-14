@@ -16,24 +16,34 @@
 
 -module(emqx_zone_schema).
 
--export([namespace/0, roots/0, fields/1]).
+-export([namespace/0, roots/0, fields/1, desc/1]).
 
 namespace() -> zone.
 
-%% this shcema module is not used at root level.
+%% this schema module is not used at root level.
 %% roots are added only for document generation.
-roots() -> ["mqtt", "stats", "flapping_detect", "force_shutdown",
-            "conn_congestion", "rate_limit", "quota", "force_gc",
-            "overload_protection"
-           ].
+roots() ->
+    [
+        "mqtt",
+        "stats",
+        "flapping_detect",
+        "force_shutdown",
+        "conn_congestion",
+        "force_gc",
+        "overload_protection"
+    ].
 
 %% zone schemas are clones from the same name from root level
 %% only not allowed to have default values.
 fields(Name) ->
     [{N, no_default(Sc)} || {N, Sc} <- emqx_schema:fields(Name)].
 
+desc(Name) ->
+    emqx_schema:desc(Name).
+
 %% no default values for zone settings
 no_default(Sc) ->
-    fun(default) -> undefined;
-       (Other) -> hocon_schema:field_schema(Sc, Other)
+    fun
+        (default) -> undefined;
+        (Other) -> hocon_schema:field_schema(Sc, Other)
     end.

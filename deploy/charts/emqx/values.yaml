@@ -7,6 +7,8 @@ replicaCount: 3
 image:
   repository: emqx/emqx
   pullPolicy: IfNotPresent
+  # Overrides the image tag whose default is the chart appVersion.
+  tag: ""
   ## Optionally specify an array of imagePullSecrets.
   ## Secrets must be manually created in the namespace.
   ## ref: https://kubernetes.io/docs/tasks/configure-pod-container/pull-image-private-registry/
@@ -24,6 +26,8 @@ image:
 ## Forces the recreation of pods during helm upgrades. This can be useful to update configuration values even if the container image did not change.
 recreatePods: false
 
+podAnnotations: {}
+
 # Pod deployment policy
 # value: OrderedReady | Parallel
 # To redeploy a chart with existing PVC(s), the value must be set to Parallel to avoid deadlock
@@ -32,9 +36,7 @@ podManagementPolicy: Parallel
 persistence:
   enabled: false
   size: 20Mi
-  ## If defined, volume.beta.kubernetes.io/storage-class: <storageClass>
-  ## Default: volume.alpha.kubernetes.io/storage-class: default
-  # storageClass: "-"
+  storageClassName: ""
   accessMode: ReadWriteOnce
   ## Existing PersistentVolumeClaims
   ## The value is evaluated as a template
@@ -51,13 +53,53 @@ resources: {}
 
 # Containers that run before the creation of EMQX containers. They can contain utilities or setup scripts.
 initContainers: {}
-  # - name: mysql-probe
-  #   image: alpine
-  #   command: ["sh", "-c", "for i in $(seq 1 300); do nc -zvw1 mysql 3306 && exit 0 || sleep 3; done; exit 1"]
+  # - name: sysctl
+  #   image: busybox
+  #   securityContext:
+  #     runAsUser: 0
+  #     runAsGroup: 0
+  #     capabilities:
+  #       add:
+  #       - SYS_ADMIN
+  #       drop:
+  #       - ALL
+  #   command:
+  #     - /bin/sh
+  #     - -c
+  #     - |
+  #       mount -o remount rw /proc/sys
+  #       sysctl -w net.core.somaxconn=65535
+  #       sysctl -w net.ipv4.ip_local_port_range="1024 65535"
+  #       sysctl -w kernel.core_uses_pid=0
+  #       sysctl -w net.ipv4.tcp_tw_reuse=1
+  #       sysctl -w fs.nr_open=1000000000
+  #       sysctl -w fs.file-max=1000000000
+  #       sysctl -w net.ipv4.ip_local_port_range='1025 65534'
+  #       sysctl -w net.ipv4.udp_mem='74583000 499445000 749166000'
+  #       sysctl -w net.ipv4.tcp_max_sync_backlog=163840
+  #       sysctl -w net.core.netdev_max_backlog=163840
+  #       sysctl -w net.core.optmem_max=16777216
+  #       sysctl -w net.ipv4.tcp_rmem='1024 4096 16777216'
+  #       sysctl -w net.ipv4.tcp_wmem='1024 4096 16777216'
+  #       sysctl -w net.ipv4.tcp_max_tw_buckets=1048576
+  #       sysctl -w net.ipv4.tcp_fin_timeout=15
+  #       sysctl -w net.core.rmem_default=262144000
+  #       sysctl -w net.core.wmem_default=262144000
+  #       sysctl -w net.core.rmem_max=262144000
+  #       sysctl -w net.core.wmem_max=262144000
+  #       sysctl -w net.ipv4.tcp_mem='378150000  504200000  756300000'
+  #       sysctl -w net.netfilter.nf_conntrack_max=1000000
+  #       sysctl -w net.netfilter.nf_conntrack_tcp_timeout_time_wait=30
 
 ## EMQX configuration item, see the documentation (https://hub.docker.com/r/emqx/emqx)
 emqxConfig:
-  EMQX_CLUSTER__K8S__APISERVER: "https://kubernetes.default.svc:443"
+  EMQX_CLUSTER__DISCOVERY_STRATEGY: "dns"
+  EMQX_CLUSTER__DNS__NAME: "{{ .Release.Name }}-headless.{{ .Release.Namespace }}.svc.cluster.local"
+  EMQX_CLUSTER__DNS__RECORD_TYPE: "srv"
+  # EMQX_CLUSTER__DISCOVERY_STRATEGY: "k8s"
+  # EMQX_CLUSTER__K8S__APISERVER: "https://kubernetes.default.svc:443"
+  # EMQX_CLUSTER__K8S__SERVICE_NAME: "{{ .Release.Name }}-headless"
+  # EMQX_CLUSTER__K8S__NAMESPACE: "{{ .Release.Namespace }}"
   ## The address type is used to extract host from k8s service.
   ## Value: ip | dns | hostname
   ## Note：Hostname is only supported after v4.0-rc.2
@@ -65,11 +107,13 @@ emqxConfig:
   EMQX_CLUSTER__K8S__SUFFIX: "svc.cluster.local"
   ## if EMQX_CLUSTER__K8S__ADDRESS_TYPE eq dns
   # EMQX_CLUSTER__K8S__SUFFIX: "pod.cluster.local"
+  EMQX_DASHBOARD__DEFAULT_USERNAME: "admin"
+  EMQX_DASHBOARD__DEFAULT_PASSWORD: "public"
 
-## EMQX Enterprise Edition requires manual creation of a Secret containing the licensed content. Write the name of Secret to the value of "emqxLicneseSecretName"
+## EMQX Enterprise Edition requires manual creation of a Secret containing the licensed content. Write the name of Secret to the value of "emqxLicenseSecretName"
 ## Example:
 ##   kubectl create secret generic emqx-license-secret-name --from-file=/path/to/emqx.lic
-emqxLicneseSecretName:
+emqxLicenseSecretName:
 
 service:
   ## Service type
@@ -81,19 +125,16 @@ service:
   ## Port for MQTT(SSL)
   ##
   mqttssl: 8883
-  ## Port for mgmt API
-  ##
-  mgmt: 8081
   ## Port for WebSocket/HTTP
   ##
   ws: 8083
   ## Port for WSS/HTTPS
   ##
   wss: 8084
-  ## Port for dashboard
+  ## Port for dashboard and API
   ##
   dashboard: 18083
-  ## Port for dashboard HTTPS
+  ## Port for dashboard and API over HTTPS
   ##
   # dashboardtls: 18084
   ## Specify the nodePort(s) value for the LoadBalancer and NodePort service types.
@@ -140,20 +181,9 @@ ingress:
       # kubernetes.io/ingress.class: nginx
       # kubernetes.io/tls-acme: "true"
     path: /
+    pathType: ImplementationSpecific
     hosts:
     - dashboard.emqx.local
-    tls: []
-
-  ## ingress for EMQX Mgmt API
-  mgmt:
-    enabled: false
-    # ingressClassName: nginx
-    annotations: {}
-      # kubernetes.io/ingress.class: nginx
-      # kubernetes.io/tls-acme: "true"
-    path: /
-    hosts:
-    - api.emqx.local
     tls: []
 
 podSecurityContext:
@@ -168,3 +198,16 @@ containerSecurityContext:
   enabled: true
   runAsNonRoot: true
   runAsUser: 1000
+
+metrics:
+  enabled: false
+  type: prometheus
+
+ssl:
+  enabled: false
+  useExisting: false
+  existingName: emqx-tls
+  dnsnames: {}
+  issuer:
+    name: letsencrypt-dns
+    kind: ClusterIssuer

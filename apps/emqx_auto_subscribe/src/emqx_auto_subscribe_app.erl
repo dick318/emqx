@@ -21,11 +21,12 @@
 -export([start/2, stop/1]).
 
 start(_StartType, _StartArgs) ->
-    {ok, Sup} = emqx_auto_subscribe_sup:start_link(),
     ok = emqx_auto_subscribe:load(),
+    {ok, Sup} = emqx_auto_subscribe_sup:start_link(),
     {ok, Sup}.
 
 stop(_State) ->
+    ok = emqx_auto_subscribe:unload(),
     ok.
 
 %% internal functions

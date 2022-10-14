@@ -18,38 +18,53 @@
 
 -include_lib("eunit/include/eunit.hrl").
 
-ensure_configured_test() ->
-    try test_ensure_configured()
-    after emqx_plugins:put_configured([])
-    end.
+-compile(nowarn_export_all).
+-compile(export_all).
+
+ensure_configured_test_todo() ->
+    meck_emqx(),
+    try
+        test_ensure_configured()
+    after
+        emqx_plugins:put_configured([])
+    end,
+    meck:unload(emqx).
 
 test_ensure_configured() ->
     ok = emqx_plugins:put_configured([]),
-    P1 =#{name_vsn => "p-1", enable => true},
-    P2 =#{name_vsn => "p-2", enable => true},
-    P3 =#{name_vsn => "p-3", enable => false},
+    P1 = #{name_vsn => "p-1", enable => true},
+    P2 = #{name_vsn => "p-2", enable => true},
+    P3 = #{name_vsn => "p-3", enable => false},
     emqx_plugins:ensure_configured(P1, front),
     emqx_plugins:ensure_configured(P2, {before, <<"p-1">>}),
     emqx_plugins:ensure_configured(P3, {before, <<"p-1">>}),
     ?assertEqual([P2, P3, P1], emqx_plugins:configured()),
-    ?assertThrow(#{error := "position_anchor_plugin_not_configured"},
-                 emqx_plugins:ensure_configured(P3, {before, <<"unknown-x">>})).
+    ?assertThrow(
+        #{error := "position_anchor_plugin_not_configured"},
+        emqx_plugins:ensure_configured(P3, {before, <<"unknown-x">>})
+    ).
 
 read_plugin_test() ->
+    meck_emqx(),
     with_rand_install_dir(
         fun(_Dir) ->
             NameVsn = "bar-5",
             InfoFile = emqx_plugins:info_file(NameVsn),
-            FakeInfo = "name=bar, rel_vsn=\"5\", rel_apps=[justname_no_vsn],"
-                       "description=\"desc bar\"",
+            FakeInfo =
+                "name=bar, rel_vsn=\"5\", rel_apps=[justname_no_vsn],"
+                "description=\"desc bar\"",
             try
                 ok = write_file(InfoFile, FakeInfo),
-                ?assertMatch({error, #{error := "bad_rel_apps"}},
-                             emqx_plugins:read_plugin(NameVsn))
+                ?assertMatch(
+                    {error, #{error := "bad_rel_apps"}},
+                    emqx_plugins:read_plugin(NameVsn, #{})
+                )
             after
                 emqx_plugins:purge(NameVsn)
             end
-        end).
+        end
+    ),
+    meck:unload(emqx).
 
 with_rand_install_dir(F) ->
     N = rand:uniform(10000000),
@@ -72,6 +87,7 @@ write_file(Path, Content) ->
 %% but it may fail in case the path is a directory
 %% or if the file is read-only
 delete_package_test() ->
+    meck_emqx(),
     with_rand_install_dir(
         fun(_Dir) ->
             File = emqx_plugins:pkg_file("a-1"),
@@ -82,11 +98,14 @@ delete_package_test() ->
             Dir = File,
             ok = filelib:ensure_dir(filename:join([Dir, "foo"])),
             ?assertMatch({error, _}, emqx_plugins:delete_package("a-1"))
-        end).
+        end
+    ),
+    meck:unload(emqx).
 
 %% purge plugin's install dir should mostly work and return ok
 %% but it may fail in case the dir is read-only
 purge_test() ->
+    meck_emqx(),
     with_rand_install_dir(
         fun(_Dir) ->
             File = emqx_plugins:info_file("a-1"),
@@ -99,5 +118,17 @@ purge_test() ->
             %% write a file for the dir path
             ok = file:write_file(Dir, "a"),
             ?assertEqual(ok, emqx_plugins:purge("a-1"))
-        end).
+        end
+    ),
+    meck:unload(emqx).
 
+meck_emqx() ->
+    meck:new(emqx, [unstick, passthrough]),
+    meck:expect(
+        emqx,
+        update_config,
+        fun(Path, Values, _Opts) ->
+            emqx_config:put(Path, Values)
+        end
+    ),
+    ok.

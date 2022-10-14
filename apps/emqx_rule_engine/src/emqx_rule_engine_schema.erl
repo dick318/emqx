@@ -17,184 +17,202 @@
 -module(emqx_rule_engine_schema).
 
 -include_lib("typerefl/include/types.hrl").
+-include_lib("hocon/include/hoconsc.hrl").
 
 -behaviour(hocon_schema).
 
--export([ namespace/0
-        , roots/0
-        , fields/1]).
+-export([
+    namespace/0,
+    roots/0,
+    fields/1,
+    desc/1,
+    post_config_update/5
+]).
 
--export([ validate_sql/1
-        ]).
+-export([validate_sql/1]).
 
 namespace() -> rule_engine.
 
 roots() -> ["rule_engine"].
 
 fields("rule_engine") ->
-    [ {ignore_sys_message, sc(boolean(), #{default => true, desc =>
-"When set to 'true' (default), rule-engine will ignore messages published to $SYS topics."
-    })}
-    , {rules, sc(hoconsc:map("id", ref("rules")), #{desc => "The rules", default => #{}})}
+    [
+        {ignore_sys_message,
+            ?HOCON(boolean(), #{default => true, desc => ?DESC("rule_engine_ignore_sys_message")})},
+        {rules,
+            ?HOCON(hoconsc:map("id", ?R_REF("rules")), #{
+                desc => ?DESC("rule_engine_rules"), default => #{}
+            })},
+        {jq_function_default_timeout,
+            ?HOCON(
+                emqx_schema:duration_ms(),
+                #{
+                    default => "10s",
+                    desc => ?DESC("rule_engine_jq_function_default_timeout")
+                }
+            )},
+        {jq_implementation_module,
+            ?HOCON(
+                hoconsc:enum([jq_nif, jq_port]),
+                #{
+                    default => jq_nif,
+                    mapping => "jq.jq_implementation_module",
+                    desc => ?DESC("rule_engine_jq_implementation_module")
+                }
+            )}
     ];
-
 fields("rules") ->
-    [ rule_name()
-    , {"sql", sc(binary(),
-        #{ desc => """
-SQL query to transform the messages.<br>
-Example: <code>SELECT * FROM \"test/topic\" WHERE payload.x = 1</code><br>
-"""
-         , example => "SELECT * FROM \"test/topic\" WHERE payload.x = 1"
-         , nullable => false
-         , validator => fun ?MODULE:validate_sql/1
-         })}
-    , {"outputs", sc(hoconsc:array(hoconsc:union(outputs())),
-        #{ desc => """
-A list of outputs of the rule.<br>
-An output can be a string that refers to the channel Id of a emqx bridge, or a object
-that refers to a function.<br>
-There a some built-in functions like \"republish\" and \"console\", and we also support user
-provided functions in the format: \"{module}:{function}\".<br>
-The outputs in the list is executed one by one in order.
-This means that if one of the output is executing slowly, all of the outputs comes after it will not
-be executed until it returns.<br>
-If one of the output crashed, all other outputs come after it will still be executed, in the
-original order.<br>
-If there's any error when running an output, there will be an error message, and the 'failure'
-counter of the function output or the bridge channel will increase.
-"""
-        , default => []
-        , example => [
-            <<"http:my_http_bridge">>,
-            #{function => republish, args => #{
-                topic => <<"t/1">>, payload => <<"${payload}">>}},
-            #{function => console}
-          ]
-        })}
-    , {"enable", sc(boolean(), #{desc => "Enable or disable the rule", default => true})}
-    , {"description", sc(binary(),
-        #{ desc => "The description of the rule"
-         , example => "Some description"
-         , default => <<>>
-         })}
+    [
+        rule_name(),
+        {"sql",
+            ?HOCON(
+                binary(),
+                #{
+                    desc => ?DESC("rules_sql"),
+                    example => "SELECT * FROM \"test/topic\" WHERE payload.x = 1",
+                    required => true,
+                    validator => fun ?MODULE:validate_sql/1
+                }
+            )},
+        {"actions",
+            ?HOCON(
+                ?ARRAY(?UNION(actions())),
+                #{
+                    desc => ?DESC("rules_actions"),
+                    default => [],
+                    example => [
+                        <<"webhook:my_webhook">>,
+                        #{
+                            function => republish,
+                            args => #{
+                                topic => <<"t/1">>, payload => <<"${payload}">>
+                            }
+                        },
+                        #{function => console}
+                    ]
+                }
+            )},
+        {"enable", ?HOCON(boolean(), #{desc => ?DESC("rules_enable"), default => true})},
+        {"description",
+            ?HOCON(
+                binary(),
+                #{
+                    desc => ?DESC("rules_description"),
+                    example => "Some description",
+                    default => <<>>
+                }
+            )},
+        {"metadata", ?HOCON(map(), #{desc => ?DESC("rules_metadata")})}
     ];
-
-fields("builtin_output_republish") ->
-    [ {function, sc(republish, #{desc => "Republish the message as a new MQTT message"})}
-    , {args, sc(ref("republish_args"),
-        #{ desc => """
-The arguments of the built-in 'republish' output.<br>
-We can use variables in the args.<br>
-
-The variables are selected by the rule. For example, if the rule SQL is defined as following:
-<code>
-    SELECT clientid, qos, payload FROM \"t/1\"
-</code>
-Then there are 3 variables available: <code>clientid</code>, <code>qos</code> and
-<code>payload</code>. And if we've set the args to:
-<code>
-    {
-        topic = \"t/${clientid}\"
-        qos = \"${qos}\"
-        payload = \"msg: ${payload}\"
-    }
-</code>
-When the rule is triggered by an MQTT message with payload = \"hello\", qos = 1,
-clientid = \"Steve\", the rule will republish a new MQTT message to topic \"t/Steve\",
-payload = \"msg: hello\", and qos = 1.
-"""
-         , default => #{}
-         })}
+fields("builtin_action_republish") ->
+    [
+        {function, ?HOCON(republish, #{desc => ?DESC("republish_function")})},
+        {args, ?HOCON(?R_REF("republish_args"), #{default => #{}})}
     ];
-
-fields("builtin_output_console") ->
-    [ {function, sc(console, #{desc => "Print the outputs to the console"})}
-    %% we may support some args for the console output in the future
-    %, {args, sc(map(), #{desc => "The arguments of the built-in 'console' output",
-    %    default => #{}})}
+fields("builtin_action_console") ->
+    [
+        {function, ?HOCON(console, #{desc => ?DESC("console_function")})}
+        %% we may support some args for the console action in the future
+        %, {args, sc(map(), #{desc => "The arguments of the built-in 'console' action",
+        %    default => #{}})}
     ];
-
 fields("user_provided_function") ->
-    [ {function, sc(binary(),
-        #{ desc => """
-The user provided function. Should be in the format: '{module}:{function}'.<br>
-Where {module} is the Erlang callback module and {function} is the Erlang function.
-<br>
-To write your own function, checkout the function <code>console</code> and
-<code>republish</code> in the source file:
-<code>apps/emqx_rule_engine/src/emqx_rule_outputs.erl</code> as an example.
-"""
-        , example => "module:function"
-        })}
-    , {args, sc(map(),
-        #{ desc => """
-The args will be passed as the 3rd argument to module:function/3,
-checkout the function <code>console</code> and <code>republish</code> in the source file:
-<code>apps/emqx_rule_engine/src/emqx_rule_outputs.erl</code> as an example.
-"""
-         , default => #{}
-         })}
+    [
+        {function,
+            ?HOCON(
+                binary(),
+                #{
+                    desc => ?DESC("user_provided_function_function"),
+                    required => true,
+                    example => "module:function"
+                }
+            )},
+        {args,
+            ?HOCON(
+                map(),
+                #{
+                    desc => ?DESC("user_provided_function_args"),
+                    default => #{}
+                }
+            )}
     ];
-
 fields("republish_args") ->
-    [ {topic, sc(binary(),
-        #{ desc =>"""
-The target topic of message to be re-published.<br>
-Template with variables is allowed, see description of the 'republish_args'.
-"""
-          , nullable => false
-          , example => <<"a/1">>
-          })}
-    , {qos, sc(qos(),
-        #{ desc => """
-The qos of the message to be re-published.
-Template with with variables is allowed, see description of the 'republish_args.<br>
-Defaults to ${qos}. If variable ${qos} is not found from the selected result of the rule,
-0 is used.
-"""
-         , default => <<"${qos}">>
-         , example => <<"${qos}">>
-         })}
-    , {retain, sc(hoconsc:union([binary(), boolean()]),
-        #{ desc => """
-The retain flag of the message to be re-published.
-Template with with variables is allowed, see description of the 'republish_args.<br>
-Defaults to ${retain}. If variable ${retain} is not found from the selected result
-of the rule, false is used.
-"""
-        , default => <<"${retain}">>
-        , example => <<"${retain}">>
-        })}
-    , {payload, sc(binary(),
-        #{ desc => """
-The payload of the message to be re-published.
-Template with with variables is allowed, see description of the 'republish_args.<br>.
-Defaults to ${payload}. If variable ${payload} is not found from the selected result
-of the rule, then the string \"undefined\" is used.
-"""
-         , default => <<"${payload}">>
-         , example => <<"${payload}">>
-         })}
+    [
+        {topic,
+            ?HOCON(
+                binary(),
+                #{
+                    desc => ?DESC("republish_args_topic"),
+                    required => true,
+                    example => <<"a/1">>
+                }
+            )},
+        {qos,
+            ?HOCON(
+                qos(),
+                #{
+                    desc => ?DESC("republish_args_qos"),
+                    default => <<"${qos}">>,
+                    example => <<"${qos}">>
+                }
+            )},
+        {retain,
+            ?HOCON(
+                hoconsc:union([boolean(), binary()]),
+                #{
+                    desc => ?DESC("republish_args_retain"),
+                    default => <<"${retain}">>,
+                    example => <<"${retain}">>
+                }
+            )},
+        {payload,
+            ?HOCON(
+                binary(),
+                #{
+                    desc => ?DESC("republish_args_payload"),
+                    default => <<"${payload}">>,
+                    example => <<"${payload}">>
+                }
+            )}
     ].
 
-rule_name() ->
-    {"name", sc(binary(),
-        #{ desc => "The name of the rule"
-         , default => ""
-         , nullable => false
-         , example => "foo"
-         })}.
+desc("rule_engine") ->
+    ?DESC("desc_rule_engine");
+desc("rules") ->
+    ?DESC("desc_rules");
+desc("builtin_action_republish") ->
+    ?DESC("desc_builtin_action_republish");
+desc("builtin_action_console") ->
+    ?DESC("desc_builtin_action_console");
+desc("user_provided_function") ->
+    ?DESC("desc_user_provided_function");
+desc("republish_args") ->
+    ?DESC("desc_republish_args");
+desc(_) ->
+    undefined.
 
-outputs() ->
-    [ binary()
-    , ref("builtin_output_republish")
-    , ref("builtin_output_console")
-    , ref("user_provided_function")
+rule_name() ->
+    {"name",
+        ?HOCON(
+            binary(),
+            #{
+                desc => ?DESC("rules_name"),
+                default => <<"">>,
+                required => false,
+                example => "foo"
+            }
+        )}.
+
+actions() ->
+    [
+        binary(),
+        ?R_REF("builtin_action_republish"),
+        ?R_REF("builtin_action_console"),
+        ?R_REF("user_provided_function")
     ].
 
 qos() ->
-    hoconsc:union([emqx_schema:qos(), binary()]).
+    ?UNION([emqx_schema:qos(), binary()]).
 
 validate_sql(Sql) ->
     case emqx_rule_sqlparser:parse(Sql) of
@@ -202,5 +220,12 @@ validate_sql(Sql) ->
         {error, Reason} -> {error, Reason}
     end.
 
-sc(Type, Meta) -> hoconsc:mk(Type, Meta).
-ref(Field) -> hoconsc:ref(?MODULE, Field).
+post_config_update(
+    [rule_engine, jq_implementation_module],
+    _Req,
+    NewSysConf,
+    _OldSysConf,
+    _AppEnvs
+) ->
+    jq:set_implementation_module(NewSysConf),
+    ok.

@@ -16,10 +16,8 @@ defmodule EMQXUmbrella.MixProject do
   The following profiles are valid:
 
     * `emqx`
-    * `emqx-edge`
     * `emqx-enterprise`
     * `emqx-pkg`
-    * `emqx-edge-pkg`
     * `emqx-enterprise-pkg`
     * `dev` -> same as `emqx`, for convenience
 
@@ -32,48 +30,48 @@ defmodule EMQXUmbrella.MixProject do
   """
 
   def project() do
-    check_profile!()
+    profile_info = check_profile!()
 
     [
       app: :emqx_mix,
       version: pkg_vsn(),
-      deps: deps(),
+      deps: deps(profile_info),
       releases: releases()
     ]
   end
 
-  defp deps() do
+  defp deps(profile_info) do
     # we need several overrides here because dependencies specify
     # other exact versions, and not ranges.
     [
-      {:lc, github: "qzhuyan/lc", tag: "0.1.2"},
+      {:lc, github: "emqx/lc", tag: "0.3.1"},
       {:redbug, "2.0.7"},
-      {:typerefl, github: "k32/typerefl", tag: "0.8.6", override: true},
-      {:ehttpc, github: "emqx/ehttpc", tag: "0.1.12"},
+      {:typerefl, github: "ieQu1/typerefl", tag: "0.9.1", override: true},
+      {:ehttpc, github: "emqx/ehttpc", tag: "0.3.0"},
       {:gproc, github: "uwiger/gproc", tag: "0.8.0", override: true},
       {:jiffy, github: "emqx/jiffy", tag: "1.0.5", override: true},
       {:cowboy, github: "emqx/cowboy", tag: "2.9.0", override: true},
-      {:esockd, github: "emqx/esockd", tag: "5.9.0", override: true},
-      {:mria, github: "emqx/mria", tag: "0.2.0", override: true},
-      {:ekka, github: "emqx/ekka", tag: "0.12.0", override: true},
-      {:gen_rpc, github: "emqx/gen_rpc", tag: "2.8.0", override: true},
-      {:minirest, github: "emqx/minirest", tag: "1.2.11", override: true},
+      {:esockd, github: "emqx/esockd", tag: "5.9.4", override: true},
+      {:ekka, github: "emqx/ekka", tag: "0.13.5", override: true},
+      {:gen_rpc, github: "emqx/gen_rpc", tag: "2.8.1", override: true},
+      {:grpc, github: "emqx/grpc-erl", tag: "0.6.7", override: true},
+      {:minirest, github: "emqx/minirest", tag: "1.3.7", override: true},
       {:ecpool, github: "emqx/ecpool", tag: "0.5.2"},
-      {:replayq, "0.3.3", override: true},
+      {:replayq, "0.3.4", override: true},
       {:pbkdf2, github: "emqx/erlang-pbkdf2", tag: "2.0.4", override: true},
-      {:emqtt, github: "emqx/emqtt", tag: "1.4.3", override: true},
+      {:emqtt, github: "emqx/emqtt", tag: "1.6.0", override: true},
       {:rulesql, github: "emqx/rulesql", tag: "0.1.4"},
       {:observer_cli, "1.7.1"},
-      {:system_monitor, github: "k32/system_monitor", tag: "3.0.2"},
+      {:system_monitor, github: "ieQu1/system_monitor", tag: "3.0.3"},
       # in conflict by emqtt and hocon
       {:getopt, "1.0.2", override: true},
-      {:snabbkaffe, github: "kafka4beam/snabbkaffe", tag: "0.18.0", override: true},
-      {:hocon, github: "emqx/hocon", tag: "0.24.0", override: true},
-      {:emqx_http_lib, github: "emqx/emqx_http_lib", tag: "0.4.1", override: true},
+      {:snabbkaffe, github: "kafka4beam/snabbkaffe", tag: "1.0.0", override: true},
+      {:hocon, github: "emqx/hocon", tag: "0.30.0", override: true},
+      {:emqx_http_lib, github: "emqx/emqx_http_lib", tag: "0.5.1", override: true},
       {:esasl, github: "emqx/esasl", tag: "0.2.0"},
       {:jose, github: "potatosalad/erlang-jose", tag: "1.11.2"},
       # in conflict by ehttpc and emqtt
-      {:gun, github: "emqx/gun", tag: "1.3.6", override: true},
+      {:gun, github: "emqx/gun", tag: "1.3.7", override: true},
       # in conflict by emqx_connectior and system_monitor
       {:epgsql, github: "emqx/epgsql", tag: "4.7-emqx.2", override: true},
       # in conflict by mongodb and eredis_cluster
@@ -90,8 +88,9 @@ defmodule EMQXUmbrella.MixProject do
       {:ranch,
        github: "ninenines/ranch", ref: "a692f44567034dacf5efcaa24a24183788594eb7", override: true},
       # in conflict by grpc and eetcd
-      {:gpb, "4.11.2", override: true}
-    ] ++ umbrella_apps() ++ bcrypt_dep() ++ quicer_dep()
+      {:gpb, "4.19.5", override: true, runtime: false}
+    ] ++
+      umbrella_apps() ++ enterprise_apps(profile_info) ++ bcrypt_dep() ++ jq_dep() ++ quicer_dep()
   end
 
   defp umbrella_apps() do
@@ -100,11 +99,29 @@ defmodule EMQXUmbrella.MixProject do
     |> Enum.map(fn path ->
       app =
         path
-        |> String.trim_leading("apps/")
+        |> Path.basename()
         |> String.to_atom()
 
       {app, path: path, manager: :rebar3, override: true}
     end)
+  end
+
+  defp enterprise_apps(_profile_info = %{edition_type: :enterprise}) do
+    "lib-ee/*"
+    |> Path.wildcard()
+    |> Enum.filter(&File.dir?/1)
+    |> Enum.map(fn path ->
+      app =
+        path
+        |> Path.basename()
+        |> String.to_atom()
+
+      {app, path: path, manager: :rebar3, override: true}
+    end)
+  end
+
+  defp enterprise_apps(_profile_info) do
+    []
   end
 
   defp releases() do
@@ -117,6 +134,7 @@ defmodule EMQXUmbrella.MixProject do
         } = check_profile!()
 
         base_steps = [
+          &make_docs(&1),
           :assemble,
           &create_RELEASES/1,
           &copy_files(&1, release_type, package_type, edition_type),
@@ -132,7 +150,7 @@ defmodule EMQXUmbrella.MixProject do
           end
 
         [
-          applications: applications(release_type, edition_type),
+          applications: applications(edition_type),
           skip_mode_validation_for: [
             :emqx_gateway,
             :emqx_dashboard,
@@ -145,6 +163,8 @@ defmodule EMQXUmbrella.MixProject do
             :emqx_statsd,
             :emqx_retainer,
             :emqx_prometheus,
+            :emqx_auto_subscribe,
+            :emqx_slow_subs,
             :emqx_plugins
           ],
           steps: steps,
@@ -154,7 +174,7 @@ defmodule EMQXUmbrella.MixProject do
     ]
   end
 
-  def applications(release_type, edition_type) do
+  def applications(edition_type) do
     [
       crypto: :permanent,
       public_key: :permanent,
@@ -166,84 +186,71 @@ defmodule EMQXUmbrella.MixProject do
       compiler: :permanent,
       runtime_tools: :permanent,
       redbug: :permanent,
+      xmerl: :permanent,
       hocon: :load,
       emqx: :load,
       emqx_conf: :load,
-      emqx_machine: :permanent,
-      mria: :load,
-      mnesia: :load,
-      ekka: :load,
-      emqx_plugin_libs: :load,
-      esasl: :load,
-      observer_cli: :permanent,
-      system_monitor: :load,
-      emqx_http_lib: :permanent,
-      emqx_resource: :permanent,
-      emqx_connector: :permanent,
-      emqx_authn: :permanent,
-      emqx_authz: :permanent,
-      emqx_auto_subscribe: :permanent,
-      emqx_gateway: :permanent,
-      emqx_exhook: :permanent,
-      emqx_bridge: :permanent,
-      emqx_rule_engine: :permanent,
-      emqx_modules: :permanent,
-      emqx_management: :permanent,
-      emqx_dashboard: :permanent,
-      emqx_retainer: :permanent,
-      emqx_statsd: :permanent,
-      emqx_prometheus: :permanent,
-      emqx_psk: :permanent,
-      emqx_slow_subs: :permanent,
-      emqx_plugins: :permanent,
-      emqx_mix: :none
+      emqx_machine: :permanent
     ] ++
-      if(enable_quicer?(), do: [quicer: :permanent], else: []) ++
-      if(enable_bcrypt?(), do: [bcrypt: :permanent], else: []) ++
-      if(edition_type == :enterprise,
-        do: [
-          emqx_enterprise_conf: :load,
-          emqx_license: :permanent
-        ],
+      if(enable_rocksdb?(),
+        do: [mnesia_rocksdb: :load],
         else: []
       ) ++
-      if(release_type == :cloud,
-        do: [xmerl: :permanent, observer: :load],
+      [
+        mnesia: :load,
+        ekka: :load,
+        emqx_plugin_libs: :load,
+        esasl: :load,
+        observer_cli: :permanent,
+        system_monitor: :load,
+        emqx_http_lib: :permanent,
+        emqx_resource: :permanent,
+        emqx_connector: :permanent,
+        emqx_authn: :permanent,
+        emqx_authz: :permanent,
+        emqx_auto_subscribe: :permanent,
+        emqx_gateway: :permanent,
+        emqx_exhook: :permanent,
+        emqx_bridge: :permanent,
+        emqx_rule_engine: :permanent,
+        emqx_modules: :permanent,
+        emqx_management: :permanent,
+        emqx_dashboard: :permanent,
+        emqx_retainer: :permanent,
+        emqx_statsd: :permanent,
+        emqx_prometheus: :permanent,
+        emqx_psk: :permanent,
+        emqx_slow_subs: :permanent,
+        emqx_plugins: :permanent,
+        emqx_mix: :none
+      ] ++
+      if(enable_quicer?(), do: [quicer: :permanent], else: []) ++
+      if(enable_bcrypt?(), do: [bcrypt: :permanent], else: []) ++
+      if(enable_jq?(), do: [jq: :permanent], else: []) ++
+      if(is_app(:observer),
+        do: [observer: :load],
+        else: []
+      ) ++
+      if(edition_type == :enterprise,
+        do: [
+          emqx_license: :permanent,
+          emqx_enterprise_conf: :load
+        ],
         else: []
       )
   end
 
-  def emqx_machine_boot_apps(:community) do
-    [
-      :emqx_prometheus,
-      :emqx_modules,
-      :emqx_dashboard,
-      :emqx_connector,
-      :emqx_gateway,
-      :emqx_statsd,
-      :emqx_resource,
-      :emqx_rule_engine,
-      :emqx_bridge,
-      :emqx_plugin_libs,
-      :emqx_management,
-      :emqx_retainer,
-      :emqx_exhook,
-      :emqx_authn,
-      :emqx_authz,
-      :emqx_plugin
-    ]
-  end
+  defp is_app(name) do
+    case Application.load(name) do
+      :ok ->
+        true
 
-  def emqx_machine_boot_apps(:enterprise) do
-    emqx_machine_boot_apps(:community) ++
-      []
-  end
+      {:error, {:already_loaded, _}} ->
+        true
 
-  defp emqx_machine_boot_app_list(edition_type) do
-    edition_type
-    |> emqx_machine_boot_apps()
-    |> Enum.map(&Atom.to_string/1)
-    |> Enum.join(", ")
+      _ ->
+        false
+    end
   end
 
   def check_profile!() do
@@ -252,9 +259,7 @@ defmodule EMQXUmbrella.MixProject do
       :emqx,
       :"emqx-pkg",
       :"emqx-enterprise",
-      :"emqx-enterprise-pkg",
-      :"emqx-edge",
-      :"emqx-edge-pkg"
+      :"emqx-enterprise-pkg"
     ]
 
     if Mix.env() not in valid_envs do
@@ -281,17 +286,11 @@ defmodule EMQXUmbrella.MixProject do
         :emqx ->
           {:cloud, :bin, :community}
 
-        :"emqx-edge" ->
-          {:edge, :bin, :community}
-
         :"emqx-enterprise" ->
           {:cloud, :bin, :enterprise}
 
         :"emqx-pkg" ->
           {:cloud, :pkg, :community}
-
-        :"emqx-edge-pkg" ->
-          {:edge, :pkg, :community}
 
         :"emqx-enterprise-pkg" ->
           {:cloud, :pkg, :enterprise}
@@ -309,6 +308,12 @@ defmodule EMQXUmbrella.MixProject do
   #############################################################################
   #  Custom Steps
   #############################################################################
+
+  defp make_docs(release) do
+    profile = System.get_env("MIX_ENV")
+    os_cmd("build", [profile, "docs"])
+    release
+  end
 
   defp copy_files(release, release_type, package_type, edition_type) do
     overwrite? = Keyword.get(release.options, :overwrite, false)
@@ -340,6 +345,12 @@ defmodule EMQXUmbrella.MixProject do
     File.cp_r!(
       "apps/emqx/etc/certs",
       Path.join(etc, "certs")
+    )
+
+    Mix.Generator.copy_file(
+      "apps/emqx_dashboard/etc/emqx.conf.en.example",
+      Path.join(etc, "emqx-example.conf"),
+      force: overwrite?
     )
 
     # this is required by the produced escript / nodetool
@@ -377,10 +388,7 @@ defmodule EMQXUmbrella.MixProject do
     vm_args_template_path =
       case release_type do
         :cloud ->
-          "apps/emqx/etc/emqx_cloud/vm.args"
-
-        :edge ->
-          "apps/emqx/etc/emqx_edge/vm.args"
+          "apps/emqx/etc/vm.args.cloud"
       end
 
     render_template(
@@ -425,10 +433,18 @@ defmodule EMQXUmbrella.MixProject do
 
     File.chmod!(Path.join(bin, "node_dump"), 0o755)
 
+    Mix.Generator.copy_file(
+      "bin/emqx_cluster_rescue",
+      Path.join(bin, "emqx_cluster_rescue"),
+      force: overwrite?
+    )
+
+    File.chmod!(Path.join(bin, "emqx_cluster_rescue"), 0o755)
+
     render_template(
-      "rel/BUILT_ON",
+      "rel/BUILD_INFO",
       assigns,
-      Path.join(release.version_path, "BUILT_ON")
+      Path.join(release.version_path, "BUILD_INFO")
     )
 
     release
@@ -511,7 +527,7 @@ defmodule EMQXUmbrella.MixProject do
   # The `:tar` built-in step in Mix Release does not currently add the
   # `etc` directory into the resulting tarball.  The workaround is to
   # add those to the `:overlays` key before running `:tar`.
-  # See: https://hexdocs.pm/mix/1.13.2/Mix.Release.html#__struct__/0
+  # See: https://hexdocs.pm/mix/1.13.4/Mix.Release.html#__struct__/0
   defp prepare_tar_overlays(release) do
     Map.update!(
       release,
@@ -531,18 +547,15 @@ defmodule EMQXUmbrella.MixProject do
 
   defp template_vars(release, release_type, :bin = _package_type, edition_type) do
     [
-      platform_bin_dir: "bin",
+      emqx_default_erlang_cookie: default_cookie(),
       platform_data_dir: "data",
       platform_etc_dir: "etc",
-      platform_lib_dir: "lib",
       platform_log_dir: "log",
       platform_plugins_dir: "plugins",
-      runner_root_dir: "$(cd $(dirname $(readlink $0 || echo $0))/..; pwd -P)",
       runner_bin_dir: "$RUNNER_ROOT_DIR/bin",
-      runner_etc_dir: "$RUNNER_ROOT_DIR/etc",
+      emqx_etc_dir: "$RUNNER_ROOT_DIR/etc",
       runner_lib_dir: "$RUNNER_ROOT_DIR/lib",
       runner_log_dir: "$RUNNER_ROOT_DIR/log",
-      runner_data_dir: "$RUNNER_ROOT_DIR/data",
       runner_user: "",
       release_version: release.version,
       erts_vsn: release.erts_version,
@@ -550,51 +563,45 @@ defmodule EMQXUmbrella.MixProject do
       erl_opts: "",
       emqx_description: emqx_description(release_type, edition_type),
       emqx_schema_mod: emqx_schema_mod(edition_type),
-      emqx_machine_boot_apps: emqx_machine_boot_app_list(edition_type),
-      built_on_arch: built_on(),
       is_elixir: "yes",
-      is_enterprise: (if edition_type == :enterprise, do: "yes", else: "no")
-    ]
+      is_enterprise: if(edition_type == :enterprise, do: "yes", else: "no")
+    ] ++ build_info()
   end
 
   defp template_vars(release, release_type, :pkg = _package_type, edition_type) do
     [
-      platform_bin_dir: "",
+      emqx_default_erlang_cookie: default_cookie(),
       platform_data_dir: "/var/lib/emqx",
       platform_etc_dir: "/etc/emqx",
-      platform_lib_dir: "",
       platform_log_dir: "/var/log/emqx",
       platform_plugins_dir: "/var/lib/emqx/plugins",
-      runner_root_dir: "/usr/lib/emqx",
       runner_bin_dir: "/usr/bin",
-      runner_etc_dir: "/etc/emqx",
+      emqx_etc_dir: "/etc/emqx",
       runner_lib_dir: "$RUNNER_ROOT_DIR/lib",
       runner_log_dir: "/var/log/emqx",
-      runner_data_dir: "/var/lib/emqx",
       runner_user: "emqx",
       release_version: release.version,
       erts_vsn: release.erts_version,
       # FIXME: this is empty in `make emqx` ???
       erl_opts: "",
       emqx_description: emqx_description(release_type, edition_type),
-      built_on_arch: built_on(),
       emqx_schema_mod: emqx_schema_mod(edition_type),
-      emqx_machine_boot_apps: emqx_machine_boot_app_list(edition_type),
       is_elixir: "yes",
-      is_enterprise: (if edition_type == :enterprise, do: "yes", else: "no")
-    ]
+      is_enterprise: if(edition_type == :enterprise, do: "yes", else: "no")
+    ] ++ build_info()
+  end
+
+  defp default_cookie() do
+    "emqx50elixir"
   end
 
   defp emqx_description(release_type, edition_type) do
     case {release_type, edition_type} do
       {:cloud, :enterprise} ->
-        "EMQ X Enterprise Edition"
+        "EMQX Enterprise"
 
       {:cloud, :community} ->
-        "EMQ X Community Edition"
-
-      {:edge, :community} ->
-        "EMQ X Edge Edition"
+        "EMQX"
     end
   end
 
@@ -607,10 +614,16 @@ defmodule EMQXUmbrella.MixProject do
       else: []
   end
 
+  defp jq_dep() do
+    if enable_jq?(),
+      do: [{:jq, github: "emqx/jq", tag: "v0.3.6", override: true}],
+      else: []
+  end
+
   defp quicer_dep() do
     if enable_quicer?(),
       # in conflict with emqx and emqtt
-      do: [{:quicer, github: "emqx/quic", tag: "0.0.9", override: true}],
+      do: [{:quicer, github: "emqx/quic", tag: "0.0.16", override: true}],
       else: []
   end
 
@@ -618,21 +631,39 @@ defmodule EMQXUmbrella.MixProject do
     not win32?()
   end
 
+  defp enable_jq?() do
+    not Enum.any?([
+      build_without_jq?(),
+      win32?()
+    ]) or "1" == System.get_env("BUILD_WITH_JQ")
+  end
+
   defp enable_quicer?() do
     not Enum.any?([
       build_without_quic?(),
       win32?(),
-      centos6?()
-    ])
+      centos6?(),
+      macos?()
+    ]) or "1" == System.get_env("BUILD_WITH_QUIC")
+  end
+
+  defp enable_rocksdb?() do
+    not Enum.any?([
+      build_without_rocksdb?(),
+      raspbian?()
+    ]) or "1" == System.get_env("BUILD_WITH_ROCKSDB")
   end
 
   defp pkg_vsn() do
     %{edition_type: edition_type} = check_profile!()
     basedir = Path.dirname(__ENV__.file)
     script = Path.join(basedir, "pkg-vsn.sh")
-    {str_vsn, 0} = System.cmd(script, [Atom.to_string(edition_type)])
+    os_cmd(script, [Atom.to_string(edition_type)])
+  end
 
-    String.trim(str_vsn)
+  defp os_cmd(script, args) do
+    {str, 0} = System.cmd("bash", [script | args])
+    String.trim(str)
   end
 
   defp win32?(),
@@ -648,8 +679,28 @@ defmodule EMQXUmbrella.MixProject do
     end
   end
 
+  defp macos?() do
+    {:unix, :darwin} == :os.type()
+  end
+
+  defp raspbian?() do
+    os_cmd("./scripts/get-distro.sh", []) =~ "raspbian"
+  end
+
+  defp build_without_jq?() do
+    opt = System.get_env("BUILD_WITHOUT_JQ", "false")
+
+    String.downcase(opt) != "false"
+  end
+
   defp build_without_quic?() do
     opt = System.get_env("BUILD_WITHOUT_QUIC", "false")
+
+    String.downcase(opt) != "false"
+  end
+
+  defp build_without_rocksdb?() do
+    opt = System.get_env("BUILD_WITHOUT_ROCKSDB", "false")
 
     String.downcase(opt) != "false"
   end
@@ -665,12 +716,15 @@ defmodule EMQXUmbrella.MixProject do
     )
   end
 
-  defp built_on() do
-    system_architecture = to_string(:erlang.system_info(:system_architecture))
-    elixir_version = System.version()
-    words = wordsize()
-
-    "#{elixir_version}-#{otp_release()}-#{system_architecture}-#{words}"
+  defp build_info() do
+    [
+      build_info_arch: to_string(:erlang.system_info(:system_architecture)),
+      build_info_wordsize: wordsize(),
+      build_info_os: os_cmd("./scripts/get-distro.sh", []),
+      build_info_erlang: otp_release(),
+      build_info_elixir: System.version(),
+      build_info_relform: System.get_env("EMQX_REL_FORM", "tgz")
+    ]
   end
 
   # https://github.com/erlang/rebar3/blob/e3108ac187b88fff01eca6001a856283a3e0ec87/src/rebar_utils.erl#L142

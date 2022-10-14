@@ -19,22 +19,25 @@
 -include("emqx_authn.hrl").
 -include_lib("emqx/include/logger.hrl").
 -include_lib("epgsql/include/epgsql.hrl").
--include_lib("typerefl/include/types.hrl").
+-include_lib("hocon/include/hoconsc.hrl").
 
 -behaviour(hocon_schema).
 -behaviour(emqx_authentication).
 
--export([ namespace/0
-        , roots/0
-        , fields/1
-        ]).
+-export([
+    namespace/0,
+    roots/0,
+    fields/1,
+    desc/1
+]).
 
--export([ refs/0
-        , create/2
-        , update/2
-        , authenticate/2
-        , destroy/1
-        ]).
+-export([
+    refs/0,
+    create/2,
+    update/2,
+    authenticate/2,
+    destroy/1
+]).
 
 -ifdef(TEST).
 -compile(export_all).
@@ -50,15 +53,23 @@ namespace() -> "authn-postgresql".
 roots() -> [?CONF_NS].
 
 fields(?CONF_NS) ->
-    [ {mechanism, emqx_authn_schema:mechanism('password-based')}
-    , {backend, emqx_authn_schema:backend(postgresql)}
-    , {password_hash_algorithm, fun emqx_authn_password_hashing:type_ro/1}
-    , {query, fun query/1}
+    [
+        {mechanism, emqx_authn_schema:mechanism(password_based)},
+        {backend, emqx_authn_schema:backend(postgresql)},
+        {password_hash_algorithm, fun emqx_authn_password_hashing:type_ro/1},
+        {query, fun query/1}
     ] ++
-    emqx_authn_schema:common_fields() ++
-    proplists:delete(named_queries, emqx_connector_pgsql:fields(config)).
+        emqx_authn_schema:common_fields() ++
+        proplists:delete(prepare_statement, emqx_connector_pgsql:fields(config)).
+
+desc(?CONF_NS) ->
+    ?DESC(?CONF_NS);
+desc(_) ->
+    undefined.
 
 query(type) -> string();
+query(desc) -> ?DESC(?FUNCTION_NAME);
+query(required) -> true;
 query(_) -> undefined.
 
 %%------------------------------------------------------------------------------
@@ -71,59 +82,76 @@ refs() ->
 create(_AuthenticatorID, Config) ->
     create(Config).
 
-create(#{query := Query0,
-         password_hash_algorithm := Algorithm} = Config) ->
-    ok = emqx_authn_password_hashing:init(Algorithm),
-    {Query, PlaceHolders} = emqx_authn_utils:parse_sql(Query0, '$n'),
+create(Config0) ->
     ResourceId = emqx_authn_utils:make_resource_id(?MODULE),
-    State = #{placeholders => PlaceHolders,
-              password_hash_algorithm => Algorithm,
-              resource_id => ResourceId},
-    case emqx_resource:create_local(ResourceId, emqx_connector_pgsql, Config#{named_queries => #{ResourceId => Query}}) of
-        {ok, already_created} ->
-            {ok, State};
-        {ok, _} ->
-            {ok, State};
+    {Config, State} = parse_config(Config0, ResourceId),
+    {ok, _Data} = emqx_authn_utils:create_resource(
+        ResourceId,
+        emqx_connector_pgsql,
+        Config
+    ),
+    {ok, State#{resource_id => ResourceId}}.
+
+update(Config0, #{resource_id := ResourceId} = _State) ->
+    {Config, NState} = parse_config(Config0, ResourceId),
+    case emqx_authn_utils:update_resource(emqx_connector_pgsql, Config, ResourceId) of
         {error, Reason} ->
-            {error, Reason}
+            error({load_config_error, Reason});
+        {ok, _} ->
+            {ok, NState#{resource_id => ResourceId}}
     end.
 
-update(Config, State) ->
-    case create(Config) of
-        {ok, NewState} ->
-            ok = destroy(State),
-            {ok, NewState};
-        {error, Reason} ->
-            {error, Reason}
-    end.
+destroy(#{resource_id := ResourceId}) ->
+    _ = emqx_resource:remove_local(ResourceId),
+    ok.
 
 authenticate(#{auth_method := _}, _) ->
     ignore;
-authenticate(#{password := Password} = Credential,
-             #{placeholders := PlaceHolders,
-               resource_id := ResourceId,
-               password_hash_algorithm := Algorithm}) ->
+authenticate(
+    #{password := Password} = Credential,
+    #{
+        placeholders := PlaceHolders,
+        resource_id := ResourceId,
+        password_hash_algorithm := Algorithm
+    }
+) ->
     Params = emqx_authn_utils:render_sql_params(PlaceHolders, Credential),
     case emqx_resource:query(ResourceId, {prepared_query, ResourceId, Params}) of
-        {ok, _Columns, []} -> ignore;
+        {ok, _Columns, []} ->
+            ignore;
         {ok, Columns, [Row | _]} ->
             NColumns = [Name || #column{name = Name} <- Columns],
             Selected = maps:from_list(lists:zip(NColumns, erlang:tuple_to_list(Row))),
-            case emqx_authn_utils:check_password_from_selected_map(
-                  Algorithm, Selected, Password) of
+            case
+                emqx_authn_utils:check_password_from_selected_map(
+                    Algorithm, Selected, Password
+                )
+            of
                 ok ->
                     {ok, emqx_authn_utils:is_superuser(Selected)};
                 {error, Reason} ->
                     {error, Reason}
             end;
         {error, Reason} ->
-            ?SLOG(error, #{msg => "postgresql_query_failed",
-                           resource => ResourceId,
-                           params => Params,
-                           reason => Reason}),
+            ?TRACE_AUTHN_PROVIDER(error, "postgresql_query_failed", #{
+                resource => ResourceId,
+                params => Params,
+                reason => Reason
+            }),
             ignore
     end.
 
-destroy(#{resource_id := ResourceId}) ->
-    _ = emqx_resource:remove_local(ResourceId),
-    ok.
+parse_config(
+    #{
+        query := Query0,
+        password_hash_algorithm := Algorithm
+    } = Config,
+    ResourceId
+) ->
+    ok = emqx_authn_password_hashing:init(Algorithm),
+    {Query, PlaceHolders} = emqx_authn_utils:parse_sql(Query0, '$n'),
+    State = #{
+        placeholders => PlaceHolders,
+        password_hash_algorithm => Algorithm
+    },
+    {Config#{prepare_statement => #{ResourceId => Query}}, State}.

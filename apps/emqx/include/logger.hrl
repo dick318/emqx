@@ -19,34 +19,47 @@
 
 %% structured logging
 -define(SLOG(Level, Data),
-        ?SLOG(Level, Data, #{})).
+    ?SLOG(Level, Data, #{})
+).
 
 %% structured logging, meta is for handler's filter.
 -define(SLOG(Level, Data, Meta),
-%% check 'allow' here, only evaluate Data and Meta when necessary
+    %% check 'allow' here, only evaluate Data and Meta when necessary
     case logger:allow(Level, ?MODULE) of
         true ->
-            logger:log(Level, (Data), (Meta#{ mfa => {?MODULE, ?FUNCTION_NAME, ?FUNCTION_ARITY}
-                                            , line => ?LINE
-            }));
+            logger:log(
+                Level,
+                (Data),
+                (Meta#{
+                    mfa => {?MODULE, ?FUNCTION_NAME, ?FUNCTION_ARITY},
+                    line => ?LINE
+                })
+            );
         false ->
             ok
-    end).
+    end
+).
 
 -define(TRACE_FILTER, emqx_trace_filter).
 
+-define(TRACE(Tag, Msg, Meta), ?TRACE(debug, Tag, Msg, Meta)).
+
 %% Only evaluate when necessary
-%% Always debug the trace events.
--define(TRACE(Tag, Msg, Meta),
-    begin
-    case persistent_term:get(?TRACE_FILTER, undefined) of
-        undefined -> ok;
+-define(TRACE(Level, Tag, Msg, Meta), begin
+    case persistent_term:get(?TRACE_FILTER, []) of
         [] -> ok;
-        List -> emqx_trace:log(List, Msg, Meta#{trace_tag => Tag})
+        %% We can't bind filter list to a variablebecause we pollute the calling scope with it.
+        %% We also don't want to wrap the macro body in a fun
+        %% beacause this adds overhead to the happy path.
+        %% So evaluate `persistent_term:get` twice.
+        _ -> emqx_trace:log(persistent_term:get(?TRACE_FILTER, []), Msg, (Meta)#{trace_tag => Tag})
     end,
-    ?SLOG(debug, (emqx_trace_formatter:format_meta(Meta))#{msg => Msg, tag => Tag},
-        #{is_trace => false})
-    end).
+    ?SLOG(
+        Level,
+        (emqx_trace_formatter:format_meta_map(Meta))#{msg => Msg, tag => Tag},
+        #{is_trace => false}
+    )
+end).
 
 %% print to 'user' group leader
 -define(ULOG(Fmt, Args), io:format(user, Fmt, Args)).

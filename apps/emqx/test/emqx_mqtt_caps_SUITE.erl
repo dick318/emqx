@@ -25,36 +25,48 @@
 all() -> emqx_common_test_helpers:all(?MODULE).
 
 t_check_pub(_) ->
-    OldConf = emqx:get_config([zones]),
+    OldConf = emqx:get_config([zones], #{}),
     emqx_config:put_zone_conf(default, [mqtt, max_qos_allowed], ?QOS_1),
     emqx_config:put_zone_conf(default, [mqtt, retain_available], false),
     timer:sleep(50),
     ok = emqx_mqtt_caps:check_pub(default, #{qos => ?QOS_1, retain => false}),
     PubFlags1 = #{qos => ?QOS_2, retain => false},
-    ?assertEqual({error, ?RC_QOS_NOT_SUPPORTED},
-                 emqx_mqtt_caps:check_pub(default, PubFlags1)),
+    ?assertEqual(
+        {error, ?RC_QOS_NOT_SUPPORTED},
+        emqx_mqtt_caps:check_pub(default, PubFlags1)
+    ),
     PubFlags2 = #{qos => ?QOS_1, retain => true},
-    ?assertEqual({error, ?RC_RETAIN_NOT_SUPPORTED},
-                 emqx_mqtt_caps:check_pub(default, PubFlags2)),
+    ?assertEqual(
+        {error, ?RC_RETAIN_NOT_SUPPORTED},
+        emqx_mqtt_caps:check_pub(default, PubFlags2)
+    ),
     emqx_config:put([zones], OldConf).
 
 t_check_sub(_) ->
-    OldConf = emqx:get_config([zones]),
-    SubOpts = #{rh  => 0,
-                rap => 0,
-                nl  => 0,
-                qos => ?QOS_2
-               },
+    OldConf = emqx:get_config([zones], #{}),
+    SubOpts = #{
+        rh => 0,
+        rap => 0,
+        nl => 0,
+        qos => ?QOS_2
+    },
     emqx_config:put_zone_conf(default, [mqtt, max_topic_levels], 2),
     emqx_config:put_zone_conf(default, [mqtt, max_qos_allowed], ?QOS_1),
     emqx_config:put_zone_conf(default, [mqtt, shared_subscription], false),
     emqx_config:put_zone_conf(default, [mqtt, wildcard_subscription], false),
     timer:sleep(50),
-    ok = emqx_mqtt_caps:check_sub(default, <<"topic">>, SubOpts),
-    ?assertEqual({error, ?RC_TOPIC_FILTER_INVALID},
-                 emqx_mqtt_caps:check_sub(default, <<"a/b/c/d">>, SubOpts)),
-    ?assertEqual({error, ?RC_WILDCARD_SUBSCRIPTIONS_NOT_SUPPORTED},
-                 emqx_mqtt_caps:check_sub(default, <<"+/#">>, SubOpts)),
-    ?assertEqual({error, ?RC_SHARED_SUBSCRIPTIONS_NOT_SUPPORTED},
-                 emqx_mqtt_caps:check_sub(default, <<"topic">>, SubOpts#{share => true})),
+    ClientInfo = #{zone => default},
+    ok = emqx_mqtt_caps:check_sub(ClientInfo, <<"topic">>, SubOpts),
+    ?assertEqual(
+        {error, ?RC_TOPIC_FILTER_INVALID},
+        emqx_mqtt_caps:check_sub(ClientInfo, <<"a/b/c/d">>, SubOpts)
+    ),
+    ?assertEqual(
+        {error, ?RC_WILDCARD_SUBSCRIPTIONS_NOT_SUPPORTED},
+        emqx_mqtt_caps:check_sub(ClientInfo, <<"+/#">>, SubOpts)
+    ),
+    ?assertEqual(
+        {error, ?RC_SHARED_SUBSCRIPTIONS_NOT_SUPPORTED},
+        emqx_mqtt_caps:check_sub(ClientInfo, <<"topic">>, SubOpts#{share => true})
+    ),
     emqx_config:put([zones], OldConf).

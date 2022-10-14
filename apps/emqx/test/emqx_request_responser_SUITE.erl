@@ -30,38 +30,51 @@ end_per_suite(_Config) ->
     emqx_common_test_helpers:stop_apps([]).
 
 all() ->
-    [request_response].
+    emqx_common_test_helpers:all(?MODULE).
 
-request_response(_Config) ->
-    request_response_per_qos(?QOS_0),
-    request_response_per_qos(?QOS_1),
+t_request_response_qos0(_Config) ->
+    request_response_per_qos(?QOS_0).
+
+t_request_response_qos1(_Config) ->
+    request_response_per_qos(?QOS_1).
+
+t_request_response_qos2(_Config) ->
     request_response_per_qos(?QOS_2).
 
 request_response_per_qos(QoS) ->
     ReqTopic = <<"request_topic">>,
     RspTopic = <<"response_topic">>,
-    {ok, Requester} = emqx_request_sender:start_link(RspTopic, QoS,
-                                                     [{proto_ver, v5},
-                                                      {clientid, <<"requester">>},
-                                                      {properties, #{ 'Request-Response-Information' => 1}}]),
+    {ok, Requester} = emqx_request_sender:start_link(
+        RspTopic,
+        QoS,
+        [
+            {proto_ver, v5},
+            {clientid, <<"requester">>},
+            {properties, #{'Request-Response-Information' => 1}}
+        ]
+    ),
     %% This is a square service
     Square = fun(_CorrData, ReqBin) ->
-                     I = b2i(ReqBin),
-                     i2b(I * I)
-              end,
-    {ok, Responder} = emqx_request_handler:start_link(ReqTopic, QoS, Square,
-                                                      [{proto_ver, v5},
-                                                       {clientid, <<"responder">>}
-                                                      ]),
+        I = b2i(ReqBin),
+        i2b(I * I)
+    end,
+    {ok, Responder} = emqx_request_handler:start_link(
+        ReqTopic,
+        QoS,
+        Square,
+        [
+            {proto_ver, v5},
+            {clientid, <<"responder">>}
+        ]
+    ),
     ok = emqx_request_sender:send(Requester, ReqTopic, RspTopic, <<"corr-1">>, <<"2">>, QoS),
     receive
         {response, <<"corr-1">>, <<"4">>} ->
             ok;
         Other ->
             erlang:error({unexpected, Other})
-    after
-        100 ->
-            erlang:error(timeout)
+    after 100 ->
+        erlang:error(timeout)
     end,
     ok = emqx_request_sender:stop(Requester),
     ok = emqx_request_handler:stop(Responder).

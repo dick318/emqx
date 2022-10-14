@@ -20,25 +20,32 @@
 
 -include("logger.hrl").
 
-
 -export([start_link/0]).
 
--export([ get_mem_check_interval/0
-        , set_mem_check_interval/1
-        , get_sysmem_high_watermark/0
-        , set_sysmem_high_watermark/1
-        , get_procmem_high_watermark/0
-        , set_procmem_high_watermark/1
-        ]).
+-export([
+    get_mem_check_interval/0,
+    set_mem_check_interval/1,
+    get_sysmem_high_watermark/0,
+    set_sysmem_high_watermark/1,
+    get_procmem_high_watermark/0,
+    set_procmem_high_watermark/1
+]).
+
+-export([
+    current_sysmem_percent/0
+]).
+
+-export([update/1]).
 
 %% gen_server callbacks
--export([ init/1
-        , handle_call/3
-        , handle_cast/2
-        , handle_info/2
-        , terminate/2
-        , code_change/3
-        ]).
+-export([
+    init/1,
+    handle_call/3,
+    handle_cast/2,
+    handle_info/2,
+    terminate/2,
+    code_change/3
+]).
 
 -include("emqx.hrl").
 
@@ -46,6 +53,9 @@
 
 start_link() ->
     gen_server:start_link({local, ?OS_MON}, ?MODULE, [], []).
+
+update(OS) ->
+    erlang:send(?MODULE, {monitor_conf_update, OS}).
 
 %%--------------------------------------------------------------------
 %% API
@@ -60,10 +70,10 @@ set_mem_check_interval(Seconds) ->
     memsup:set_check_interval(Seconds div 60000).
 
 get_sysmem_high_watermark() ->
-    memsup:get_sysmem_high_watermark().
+    gen_server:call(?OS_MON, ?FUNCTION_NAME, infinity).
 
 set_sysmem_high_watermark(Float) ->
-    memsup:set_sysmem_high_watermark(Float).
+    gen_server:call(?OS_MON, {?FUNCTION_NAME, Float}, infinity).
 
 get_procmem_high_watermark() ->
     memsup:get_procmem_high_watermark().
@@ -71,63 +81,86 @@ get_procmem_high_watermark() ->
 set_procmem_high_watermark(Float) ->
     memsup:set_procmem_high_watermark(Float).
 
+current_sysmem_percent() ->
+    Ratio = load_ctl:get_memory_usage(),
+    erlang:floor(Ratio * 10000) / 100.
+
 %%--------------------------------------------------------------------
 %% gen_server callbacks
 %%--------------------------------------------------------------------
 
 init([]) ->
+    %% memsup is not reliable, ignore
+    memsup:set_sysmem_high_watermark(1.0),
+    SysHW = init_os_monitor(),
+    _ = start_mem_check_timer(),
+    _ = start_cpu_check_timer(),
+    {ok, #{sysmem_high_watermark => SysHW}}.
+
+init_os_monitor() ->
+    init_os_monitor(emqx:get_config([sysmon, os])).
+
+init_os_monitor(OS) ->
     #{
         sysmem_high_watermark := SysHW,
         procmem_high_watermark := PHW,
         mem_check_interval := MCI
-    } = emqx:get_config([sysmon, os]),
-
-    set_sysmem_high_watermark(SysHW),
+    } = OS,
     set_procmem_high_watermark(PHW),
     set_mem_check_interval(MCI),
-    ensure_system_memory_alarm(SysHW),
-    _ = start_check_timer(),
-    {ok, #{}}.
+    ok = update_mem_alarm_status(SysHW),
+    SysHW.
 
+handle_call(get_sysmem_high_watermark, _From, #{sysmem_high_watermark := HWM} = State) ->
+    {reply, HWM, State};
+handle_call({set_sysmem_high_watermark, New}, _From, #{sysmem_high_watermark := _Old} = State) ->
+    ok = update_mem_alarm_status(New),
+    {reply, ok, State#{sysmem_high_watermark := New}};
 handle_call(Req, _From, State) ->
     {reply, {error, {unexpected_call, Req}}, State}.
 
 handle_cast(Msg, State) ->
-    ?SLOG(error, #{msg => "unexpected_cast", cast=> Msg}),
+    ?SLOG(error, #{msg => "unexpected_cast", cast => Msg}),
     {noreply, State}.
 
-handle_info({timeout, _Timer, check}, State) ->
+handle_info({timeout, _Timer, mem_check}, #{sysmem_high_watermark := HWM} = State) ->
+    ok = update_mem_alarm_status(HWM),
+    ok = start_mem_check_timer(),
+    {noreply, State};
+handle_info({timeout, _Timer, cpu_check}, State) ->
     CPUHighWatermark = emqx:get_config([sysmon, os, cpu_high_watermark]) * 100,
     CPULowWatermark = emqx:get_config([sysmon, os, cpu_low_watermark]) * 100,
-    _ = case emqx_vm:cpu_util() of %% TODO: should be improved?
-        0 -> ok;
+    case emqx_vm:cpu_util() of
+        0 ->
+            ok;
         Busy when Busy > CPUHighWatermark ->
-            Usage = list_to_binary(io_lib:format("~.2f%", [Busy])),
-            Message = <<Usage/binary, " cpu usage">>,
-            emqx_alarm:activate(high_cpu_usage,
+            _ = emqx_alarm:activate(
+                high_cpu_usage,
                 #{
-                    usage => Usage,
+                    usage => Busy,
                     high_watermark => CPUHighWatermark,
                     low_watermark => CPULowWatermark
                 },
-                Message),
-            start_check_timer();
+                usage_msg(Busy, cpu)
+            );
         Busy when Busy < CPULowWatermark ->
-            Usage = list_to_binary(io_lib:format("~.2f%", [Busy])),
-            Message = <<Usage/binary, " cpu usage">>,
-            emqx_alarm:deactivate(high_cpu_usage,
+            ok = emqx_alarm:ensure_deactivated(
+                high_cpu_usage,
                 #{
-                    usage => Usage,
+                    usage => Busy,
                     high_watermark => CPUHighWatermark,
                     low_watermark => CPULowWatermark
                 },
-                Message),
-            start_check_timer();
+                usage_msg(Busy, cpu)
+            );
         _Busy ->
-            start_check_timer()
+            ok
     end,
+    ok = start_cpu_check_timer(),
     {noreply, State};
-
+handle_info({monitor_conf_update, OS}, _State) ->
+    SysHW = init_os_monitor(OS),
+    {noreply, #{sysmem_high_watermark => SysHW}};
 handle_info(Info, State) ->
     ?SLOG(error, #{msg => "unexpected_info", info => Info}),
     {noreply, State}.
@@ -142,26 +175,66 @@ code_change(_OldVsn, State, _Extra) ->
 %% Internal functions
 %%--------------------------------------------------------------------
 
-start_check_timer() ->
+start_cpu_check_timer() ->
     Interval = emqx:get_config([sysmon, os, cpu_check_interval]),
     case erlang:system_info(system_architecture) of
         "x86_64-pc-linux-musl" -> ok;
-        _ -> emqx_misc:start_timer(Interval, check)
+        _ -> start_timer(Interval, cpu_check)
     end.
 
-%% At startup, memsup starts first and checks for memory alarms,
-%% but emqx_alarm_handler is not yet used instead of alarm_handler,
-%% so alarm_handler is used directly for notification (normally emqx_alarm_handler should be used).
-%%The internal memsup will no longer trigger events that have been alerted,
-%% and there is no exported function to remove the alerted flag,
-%% so it can only be checked again at startup.
-ensure_system_memory_alarm(HW) ->
-    case erlang:whereis(memsup) of
-        undefined -> ok;
-        _Pid ->
-            {Allocated, Total, _Worst} = memsup:get_memory_data(),
-            case Total =/= 0 andalso Allocated/Total * 100 > HW of
-                true -> emqx_alarm:activate(high_system_memory_usage, #{high_watermark => HW});
-                false -> ok
-            end
+is_sysmem_check_supported() ->
+    {unix, linux} =:= os:type().
+
+start_mem_check_timer() ->
+    Interval = emqx:get_config([sysmon, os, mem_check_interval]),
+    case is_integer(Interval) andalso is_sysmem_check_supported() of
+        true ->
+            start_timer(Interval, mem_check);
+        false ->
+            ok
     end.
+
+start_timer(Interval, Msg) ->
+    _ = emqx_misc:start_timer(Interval, Msg),
+    ok.
+
+update_mem_alarm_status(HWM) when HWM > 1.0 orelse HWM < 0.0 ->
+    ?SLOG(warning, #{msg => "discarded_out_of_range_mem_alarm_threshold", value => HWM}),
+    ok = emqx_alarm:ensure_deactivated(
+        high_system_memory_usage,
+        #{},
+        <<"Deactivated mem usage alarm due to out of range threshold">>
+    );
+update_mem_alarm_status(HWM) ->
+    is_sysmem_check_supported() andalso
+        do_update_mem_alarm_status(HWM),
+    ok.
+
+do_update_mem_alarm_status(HWM0) ->
+    HWM = HWM0 * 100,
+    Usage = current_sysmem_percent(),
+    case Usage > HWM of
+        true ->
+            _ = emqx_alarm:activate(
+                high_system_memory_usage,
+                #{
+                    usage => Usage,
+                    high_watermark => HWM
+                },
+                usage_msg(Usage, mem)
+            );
+        _ ->
+            ok = emqx_alarm:ensure_deactivated(
+                high_system_memory_usage,
+                #{
+                    usage => Usage,
+                    high_watermark => HWM
+                },
+                usage_msg(Usage, mem)
+            )
+    end,
+    ok.
+
+usage_msg(Usage, What) ->
+    %% devide by 1.0 to ensure float point number
+    iolist_to_binary(io_lib:format("~.2f% ~p usage", [Usage / 1.0, What])).

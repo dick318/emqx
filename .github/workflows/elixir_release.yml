@@ -10,15 +10,18 @@ on:
   workflow_dispatch:
 
 jobs:
-  build:
+  elixir_release_build:
     runs-on: ubuntu-latest
-    container: ghcr.io/emqx/emqx-builder/5.0-5:1.13.2-24.1.5-4-ubuntu20.04
+    container: ghcr.io/emqx/emqx-builder/5.0-17:1.13.4-24.2.1-1-ubuntu20.04
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v2.4.0
+        uses: actions/checkout@v2
       - name: install tools
         run: apt update && apt install netcat-openbsd
+      - name: Work around https://github.com/actions/checkout/issues/766
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
       - name: elixir release
         run: make emqx-elixir
       - name: start release

@@ -33,37 +33,152 @@ t_crud_rule_api(_Config) ->
         <<"description">> => <<"A simple rule">>,
         <<"enable">> => true,
         <<"id">> => RuleID,
-        <<"outputs">> => [#{<<"function">> => <<"console">>}],
-        <<"sql">> => <<"SELECT * from \"t/1\"">>
+        <<"actions">> => [#{<<"function">> => <<"console">>}],
+        <<"sql">> => <<"SELECT * from \"t/1\"">>,
+        <<"name">> => <<"test_rule">>
     },
     {201, Rule} = emqx_rule_engine_api:'/rules'(post, #{body => Params0}),
     %% if we post again with the same params, it return with 400 "rule id already exists"
-    ?assertMatch({400, #{code := _, message := _Message}},
-        emqx_rule_engine_api:'/rules'(post, #{body => Params0})),
+    ?assertMatch(
+        {400, #{code := _, message := _Message}},
+        emqx_rule_engine_api:'/rules'(post, #{body => Params0})
+    ),
 
     ?assertEqual(RuleID, maps:get(id, Rule)),
-    {200, Rules} = emqx_rule_engine_api:'/rules'(get, #{}),
+    {200, #{data := Rules}} = emqx_rule_engine_api:'/rules'(get, #{query_string => #{}}),
     ct:pal("RList : ~p", [Rules]),
     ?assert(length(Rules) > 0),
+
+    {200, Rule0} = emqx_rule_engine_api:'/rules/:id/reset_metrics'(put, #{
+        bindings => #{id => RuleID}
+    }),
+    ?assertEqual(<<"Reset Success">>, Rule0),
 
     {200, Rule1} = emqx_rule_engine_api:'/rules/:id'(get, #{bindings => #{id => RuleID}}),
     ct:pal("RShow : ~p", [Rule1]),
     ?assertEqual(Rule, Rule1),
 
     {200, Rule2} = emqx_rule_engine_api:'/rules/:id'(put, #{
-            bindings => #{id => RuleID},
-            body => Params0#{<<"sql">> => <<"select * from \"t/b\"">>}
-        }),
+        bindings => #{id => RuleID},
+        body => Params0#{<<"sql">> => <<"select * from \"t/b\"">>}
+    }),
 
     {200, Rule3} = emqx_rule_engine_api:'/rules/:id'(get, #{bindings => #{id => RuleID}}),
     %ct:pal("RShow : ~p", [Rule3]),
     ?assertEqual(Rule3, Rule2),
     ?assertEqual(<<"select * from \"t/b\"">>, maps:get(sql, Rule3)),
 
-    ?assertMatch({204}, emqx_rule_engine_api:'/rules/:id'(delete,
-        #{bindings => #{id => RuleID}})),
+    ?assertMatch(
+        {204},
+        emqx_rule_engine_api:'/rules/:id'(
+            delete,
+            #{bindings => #{id => RuleID}}
+        )
+    ),
 
     %ct:pal("Show After Deleted: ~p", [NotFound]),
-    ?assertMatch({404, #{code := _, message := _Message}},
-        emqx_rule_engine_api:'/rules/:id'(get, #{bindings => #{id => RuleID}})),
+    ?assertMatch(
+        {404, #{code := _, message := _Message}},
+        emqx_rule_engine_api:'/rules/:id'(get, #{bindings => #{id => RuleID}})
+    ),
+
+    ?assertMatch(
+        {400, #{
+            code := 'BAD_REQUEST',
+            message := <<"{select_and_transform_error,{error,{decode_json_failed,", _/binary>>
+        }},
+        emqx_rule_engine_api:'/rule_test'(post, test_rule_params())
+    ),
     ok.
+
+t_list_rule_api(_Config) ->
+    AddIds =
+        lists:map(
+            fun(Seq0) ->
+                Seq = integer_to_binary(Seq0),
+                Params = #{
+                    <<"description">> => <<"A simple rule">>,
+                    <<"enable">> => true,
+                    <<"actions">> => [#{<<"function">> => <<"console">>}],
+                    <<"sql">> => <<"SELECT * from \"t/1\"">>,
+                    <<"name">> => <<"test_rule", Seq/binary>>
+                },
+                {201, #{id := Id}} = emqx_rule_engine_api:'/rules'(post, #{body => Params}),
+                Id
+            end,
+            lists:seq(1, 20)
+        ),
+
+    {200, #{data := Rules, meta := #{count := Count}}} =
+        emqx_rule_engine_api:'/rules'(get, #{query_string => #{}}),
+    ?assertEqual(20, length(AddIds)),
+    ?assertEqual(20, length(Rules)),
+    ?assertEqual(20, Count),
+
+    [RuleID | _] = AddIds,
+    UpdateParams = #{
+        <<"description">> => <<"中文的描述也能搜索"/utf8>>,
+        <<"enable">> => false,
+        <<"actions">> => [#{<<"function">> => <<"console">>}],
+        <<"sql">> => <<"SELECT * from \"t/1/+\"">>,
+        <<"name">> => <<"test_rule_update1">>
+    },
+    {200, _Rule2} = emqx_rule_engine_api:'/rules/:id'(put, #{
+        bindings => #{id => RuleID},
+        body => UpdateParams
+    }),
+    QueryStr1 = #{query_string => #{<<"enable">> => false}},
+    {200, Result1 = #{meta := #{count := Count1}}} = emqx_rule_engine_api:'/rules'(get, QueryStr1),
+    ?assertEqual(1, Count1),
+
+    QueryStr2 = #{query_string => #{<<"like_description">> => <<"也能"/utf8>>}},
+    {200, Result2} = emqx_rule_engine_api:'/rules'(get, QueryStr2),
+    ?assertEqual(Result1, Result2),
+
+    QueryStr3 = #{query_string => #{<<"from">> => <<"t/1">>}},
+    {200, #{meta := #{count := Count3}}} = emqx_rule_engine_api:'/rules'(get, QueryStr3),
+    ?assertEqual(19, Count3),
+
+    QueryStr4 = #{query_string => #{<<"like_from">> => <<"t/1/+">>}},
+    {200, Result4} = emqx_rule_engine_api:'/rules'(get, QueryStr4),
+    ?assertEqual(Result1, Result4),
+
+    QueryStr5 = #{query_string => #{<<"match_from">> => <<"t/+/+">>}},
+    {200, Result5} = emqx_rule_engine_api:'/rules'(get, QueryStr5),
+    ?assertEqual(Result1, Result5),
+
+    QueryStr6 = #{query_string => #{<<"like_id">> => RuleID}},
+    {200, Result6} = emqx_rule_engine_api:'/rules'(get, QueryStr6),
+    ?assertEqual(Result1, Result6),
+
+    %% clean up
+    lists:foreach(
+        fun(Id) ->
+            ?assertMatch(
+                {204},
+                emqx_rule_engine_api:'/rules/:id'(
+                    delete,
+                    #{bindings => #{id => Id}}
+                )
+            )
+        end,
+        AddIds
+    ),
+    ok.
+
+test_rule_params() ->
+    #{
+        body => #{
+            <<"context">> =>
+                #{
+                    <<"clientid">> => <<"c_emqx">>,
+                    <<"event_type">> => <<"message_publish">>,
+                    <<"payload">> => <<"{\"msg\": \"hel">>,
+                    <<"qos">> => 1,
+                    <<"topic">> => <<"t/a">>,
+                    <<"username">> => <<"u_emqx">>
+                },
+            <<"sql">> =>
+                <<"SELECT\n  payload.msg\nFROM\n  \"t/#\"">>
+        }
+    }.

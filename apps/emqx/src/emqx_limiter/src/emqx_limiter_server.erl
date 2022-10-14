@@ -30,61 +30,74 @@
 -include_lib("emqx/include/logger.hrl").
 
 %% gen_server callbacks
--export([init/1, handle_call/3, handle_cast/2, handle_info/2,
-         terminate/2, code_change/3, format_status/2]).
+-export([
+    init/1,
+    handle_call/3,
+    handle_cast/2,
+    handle_info/2,
+    terminate/2,
+    code_change/3,
+    format_status/2
+]).
 
--export([ start_link/1, connect/2, info/2
-        , name/1, get_initial_val/1]).
+-export([
+    start_link/2,
+    connect/3,
+    add_bucket/3,
+    del_bucket/2,
+    get_initial_val/1,
+    whereis/1,
+    info/1,
+    name/1,
+    restart/1,
+    update_config/2
+]).
 
--type root() :: #{ rate := rate()             %% number of tokens generated per period
-                 , burst := rate()
-                 , period := pos_integer()    %% token generation interval(second)
-                 , childs := list(node_id())  %% node children
-                 , consumed := non_neg_integer()
-                 }.
+%% number of tokens generated per period
+-type root() :: #{
+    rate := rate(),
+    burst := rate(),
+    %% token generation interval(second)
+    period := pos_integer(),
+    produced := float()
+}.
 
--type zone() :: #{ id := node_id()
-                 , name := zone_name()
-                 , rate := rate()
-                 , burst := rate()
-                 , obtained := non_neg_integer()       %% number of tokens obtained
-                 , childs := list(node_id())
-                 }.
+-type bucket() :: #{
+    name := bucket_name(),
+    rate := rate(),
+    obtained := float(),
+    %% token correction value
+    correction := emqx_limiter_decimal:zero_or_float(),
+    capacity := capacity(),
+    counter := undefined | counters:counters_ref(),
+    index := undefined | index()
+}.
 
--type bucket() :: #{ id := node_id()
-                   , name := bucket_name()
-                   , zone := zone_name()               %% pointer to zone node, use for burst
-                   , rate := rate()
-                   , obtained := non_neg_integer()
-                   , correction := emqx_limiter_decimal:zero_or_float() %% token correction value
-                   , capacity := capacity()
-                   , counter := undefined | counters:counters_ref()
-                   , index := undefined | index()
-                   }.
+-type state() :: #{
+    type := limiter_type(),
+    root := root(),
+    buckets := buckets(),
+    %% current counter to alloc
+    counter := counters:counters_ref(),
+    index := 0 | index()
+}.
 
--type state() :: #{ root := undefined | root()
-                  , counter := undefined | counters:counters_ref() %% current counter to alloc
-                  , index := index()
-                  , zones := #{zone_name() => node_id()}
-                  , buckets := list(node_id())
-                  , nodes := nodes()
-                  , type := limiter_type()
-                  }.
-
--type node_id() :: pos_integer().
--type node_data() :: zone() | bucket().
--type nodes() :: #{node_id() => node_data()}.
--type zone_name() :: emqx_limiter_schema:zone_name().
+-type buckets() :: #{bucket_name() => bucket()}.
 -type limiter_type() :: emqx_limiter_schema:limiter_type().
 -type bucket_name() :: emqx_limiter_schema:bucket_name().
+-type limiter_id() :: emqx_limiter_schema:limiter_id().
 -type rate() :: decimal().
 -type flow() :: decimal().
 -type capacity() :: decimal().
 -type decimal() :: emqx_limiter_decimal:decimal().
 -type index() :: pos_integer().
 
--define(CALL(Type, Msg), gen_server:call(name(Type), {?FUNCTION_NAME, Msg})).
--define(OVERLOAD_MIN_ALLOC, 0.3).  %% minimum coefficient for overloaded limiter
+-define(CALL(Type, Msg), call(Type, Msg)).
+-define(CALL(Type), ?CALL(Type, ?FUNCTION_NAME)).
+
+%% minimum coefficient for overloaded limiter
+-define(OVERLOAD_MIN_ALLOC, 0.3).
+-define(COUNTER_SIZE, 8).
 
 -export_type([index/0]).
 -import(emqx_limiter_decimal, [add/2, sub/2, mul/2, put_to_counter/3]).
@@ -94,51 +107,79 @@
 %%--------------------------------------------------------------------
 %% API
 %%--------------------------------------------------------------------
--spec connect(limiter_type(),
-              bucket_name() | #{limiter_type() => bucket_name()}) -> emqx_htb_limiter:limiter().
-connect(Type, BucketName) when is_atom(BucketName) ->
-    Path = [limiter, Type, bucket, BucketName],
-    case emqx:get_config(Path, undefined) of
-        undefined ->
-            ?SLOG(error, #{msg => "bucket_config_not_found", path => Path}),
-            throw("bucket's config not found");
-        #{zone := Zone,
-          aggregated := #{rate := AggrRate, capacity := AggrSize},
-          per_client := #{rate := CliRate, capacity := CliSize} = Cfg} ->
-            case emqx_limiter_manager:find_bucket(Type, Zone, BucketName) of
+-spec connect(
+    limiter_id(),
+    limiter_type(),
+    bucket_name() | #{limiter_type() => bucket_name() | undefined}
+) ->
+    {ok, emqx_htb_limiter:limiter()} | {error, _}.
+%% If no bucket path is set in config, there will be no limit
+connect(_Id, _Type, undefined) ->
+    {ok, emqx_htb_limiter:make_infinity_limiter()};
+connect(Id, Type, Cfg) ->
+    case find_limiter_cfg(Type, Cfg) of
+        {undefined, _} ->
+            {ok, emqx_htb_limiter:make_infinity_limiter()};
+        {
+            #{
+                rate := BucketRate,
+                capacity := BucketSize
+            },
+            #{rate := CliRate, capacity := CliSize} = ClientCfg
+        } ->
+            case emqx_limiter_manager:find_bucket(Id, Type) of
                 {ok, Bucket} ->
-                    if CliRate < AggrRate orelse CliSize < AggrSize ->
-                            emqx_htb_limiter:make_token_bucket_limiter(Cfg, Bucket);
-                       Bucket =:= infinity ->
-                            emqx_htb_limiter:make_infinity_limiter(Cfg);
-                       true ->
-                            emqx_htb_limiter:make_ref_limiter(Cfg, Bucket)
-                    end;
+                    {ok,
+                        if
+                            CliRate < BucketRate orelse CliSize < BucketSize ->
+                                emqx_htb_limiter:make_token_bucket_limiter(ClientCfg, Bucket);
+                            true ->
+                                emqx_htb_limiter:make_ref_limiter(ClientCfg, Bucket)
+                        end};
                 undefined ->
-                    ?SLOG(error, #{msg => "bucket_not_found", path => Path}),
-                    throw("invalid bucket")
+                    ?SLOG(error, #{msg => "bucket_not_found", type => Type, id => Id}),
+                    {error, invalid_bucket}
             end
-    end;
+    end.
 
-connect(Type, Names) ->
-    connect(Type, maps:get(Type, Names, default)).
+-spec add_bucket(limiter_id(), limiter_type(), hocons:config() | undefined) -> ok.
+add_bucket(_Id, _Type, undefine) ->
+    ok;
+add_bucket(Id, Type, Cfg) ->
+    ?CALL(Type, {add_bucket, Id, Cfg}).
 
--spec info(limiter_type(), atom()) -> term().
-info(Type, Info) ->
-    ?CALL(Type, Info).
+-spec del_bucket(limiter_id(), limiter_type()) -> ok.
+del_bucket(Id, Type) ->
+    ?CALL(Type, {del_bucket, Id}).
+
+-spec info(limiter_type()) -> state() | {error, _}.
+info(Type) ->
+    ?CALL(Type).
 
 -spec name(limiter_type()) -> atom().
 name(Type) ->
     erlang:list_to_atom(io_lib:format("~s_~s", [?MODULE, Type])).
+
+-spec restart(limiter_type()) -> ok | {error, _}.
+restart(Type) ->
+    ?CALL(Type).
+
+-spec update_config(limiter_type(), hocons:config()) -> ok | {error, _}.
+update_config(Type, Config) ->
+    ?CALL(Type, {update_config, Type, Config}).
+
+-spec whereis(limiter_type()) -> pid() | undefined.
+whereis(Type) ->
+    erlang:whereis(name(Type)).
 
 %%--------------------------------------------------------------------
 %% @doc
 %% Starts the server
 %% @end
 %%--------------------------------------------------------------------
--spec start_link(limiter_type()) -> _.
-start_link(Type) ->
-    gen_server:start_link({local, name(Type)}, ?MODULE, [Type], []).
+-spec start_link(limiter_type(), hocons:config()) -> _.
+start_link(Type, Cfg) ->
+    gen_server:start_link({local, name(Type)}, ?MODULE, [Type, Cfg], []).
 
 %%--------------------------------------------------------------------
 %%% gen_server callbacks
@@ -150,23 +191,17 @@ start_link(Type) ->
 %% Initializes the server
 %% @end
 %%--------------------------------------------------------------------
--spec init(Args :: term()) -> {ok, State :: term()} |
-          {ok, State :: term(), Timeout :: timeout()} |
-          {ok, State :: term(), hibernate} |
-          {stop, Reason :: term()} |
-          ignore.
-init([Type]) ->
-    State = #{root => undefined,
-              counter => undefined,
-              index => 1,
-              zones => #{},
-              nodes => #{},
-              buckets => [],
-              type => Type},
-    State2 = init_tree(Type, State),
-    #{root := #{period := Perido}} = State2,
+-spec init(Args :: term()) ->
+    {ok, State :: term()}
+    | {ok, State :: term(), Timeout :: timeout()}
+    | {ok, State :: term(), hibernate}
+    | {stop, Reason :: term()}
+    | ignore.
+init([Type, Cfg]) ->
+    State = init_tree(Type, Cfg),
+    #{root := #{period := Perido}} = State,
     oscillate(Perido),
-    {ok, State2}.
+    {ok, State}.
 
 %%--------------------------------------------------------------------
 %% @private
@@ -175,14 +210,28 @@ init([Type]) ->
 %% @end
 %%--------------------------------------------------------------------
 -spec handle_call(Request :: term(), From :: {pid(), term()}, State :: term()) ->
-          {reply, Reply :: term(), NewState :: term()} |
-          {reply, Reply :: term(), NewState :: term(), Timeout :: timeout()} |
-          {reply, Reply :: term(), NewState :: term(), hibernate} |
-          {noreply, NewState :: term()} |
-          {noreply, NewState :: term(), Timeout :: timeout()} |
-          {noreply, NewState :: term(), hibernate} |
-          {stop, Reason :: term(), Reply :: term(), NewState :: term()} |
-          {stop, Reason :: term(), NewState :: term()}.
+    {reply, Reply :: term(), NewState :: term()}
+    | {reply, Reply :: term(), NewState :: term(), Timeout :: timeout()}
+    | {reply, Reply :: term(), NewState :: term(), hibernate}
+    | {noreply, NewState :: term()}
+    | {noreply, NewState :: term(), Timeout :: timeout()}
+    | {noreply, NewState :: term(), hibernate}
+    | {stop, Reason :: term(), Reply :: term(), NewState :: term()}
+    | {stop, Reason :: term(), NewState :: term()}.
+handle_call(info, _From, State) ->
+    {reply, State, State};
+handle_call(restart, _From, #{type := Type}) ->
+    NewState = init_tree(Type),
+    {reply, ok, NewState};
+handle_call({update_config, Type, Config}, _From, #{type := Type}) ->
+    NewState = init_tree(Type, Config),
+    {reply, ok, NewState};
+handle_call({add_bucket, Id, Cfg}, _From, State) ->
+    NewState = do_add_bucket(Id, Cfg, State),
+    {reply, ok, NewState};
+handle_call({del_bucket, Id}, _From, State) ->
+    NewState = do_del_bucket(Id, State),
+    {reply, ok, NewState};
 handle_call(Req, _From, State) ->
     ?SLOG(error, #{msg => "unexpected_call", call => Req}),
     {reply, ignored, State}.
@@ -194,10 +243,10 @@ handle_call(Req, _From, State) ->
 %% @end
 %%--------------------------------------------------------------------
 -spec handle_cast(Request :: term(), State :: term()) ->
-          {noreply, NewState :: term()} |
-          {noreply, NewState :: term(), Timeout :: timeout()} |
-          {noreply, NewState :: term(), hibernate} |
-          {stop, Reason :: term(), NewState :: term()}.
+    {noreply, NewState :: term()}
+    | {noreply, NewState :: term(), Timeout :: timeout()}
+    | {noreply, NewState :: term(), hibernate}
+    | {stop, Reason :: term(), NewState :: term()}.
 handle_cast(Req, State) ->
     ?SLOG(error, #{msg => "unexpected_cast", cast => Req}),
     {noreply, State}.
@@ -209,13 +258,12 @@ handle_cast(Req, State) ->
 %% @end
 %%--------------------------------------------------------------------
 -spec handle_info(Info :: timeout() | term(), State :: term()) ->
-          {noreply, NewState :: term()} |
-          {noreply, NewState :: term(), Timeout :: timeout()} |
-          {noreply, NewState :: term(), hibernate} |
-          {stop, Reason :: normal | term(), NewState :: term()}.
+    {noreply, NewState :: term()}
+    | {noreply, NewState :: term(), Timeout :: timeout()}
+    | {noreply, NewState :: term(), hibernate}
+    | {stop, Reason :: normal | term(), NewState :: term()}.
 handle_info(oscillate, State) ->
     {noreply, oscillation(State)};
-
 handle_info(Info, State) ->
     ?SLOG(error, #{msg => "unexpected_info", info => Info}),
     {noreply, State}.
@@ -229,8 +277,10 @@ handle_info(Info, State) ->
 %% with Reason. The return value is ignored.
 %% @end
 %%--------------------------------------------------------------------
--spec terminate(Reason :: normal | shutdown | {shutdown, term()} | term(),
-                State :: term()) -> any().
+-spec terminate(
+    Reason :: normal | shutdown | {shutdown, term()} | term(),
+    State :: term()
+) -> any().
 terminate(_Reason, _State) ->
     ok.
 
@@ -240,10 +290,13 @@ terminate(_Reason, _State) ->
 %% Convert process state when code is changed
 %% @end
 %%--------------------------------------------------------------------
--spec code_change(OldVsn :: term() | {down, term()},
-                  State :: term(),
-                  Extra :: term()) -> {ok, NewState :: term()} |
-          {error, Reason :: term()}.
+-spec code_change(
+    OldVsn :: term() | {down, term()},
+    State :: term(),
+    Extra :: term()
+) ->
+    {ok, NewState :: term()}
+    | {error, Reason :: term()}.
 code_change(_OldVsn, State, _Extra) ->
     {ok, State}.
 
@@ -255,8 +308,10 @@ code_change(_OldVsn, State, _Extra) ->
 %% or when it appears in termination error logs.
 %% @end
 %%--------------------------------------------------------------------
--spec format_status(Opt :: normal | terminate,
-                    Status :: list()) -> Status :: term().
+-spec format_status(
+    Opt :: normal | terminate,
+    Status :: list()
+) -> Status :: term().
 format_status(_Opt, Status) ->
     Status.
 
@@ -268,61 +323,54 @@ oscillate(Interval) ->
 
 %% @doc generate tokens, and then spread to leaf nodes
 -spec oscillation(state()) -> state().
-oscillation(#{root := #{rate := Flow,
-                        period := Interval,
-                        childs := ChildIds,
-                        consumed := Consumed} = Root,
-              nodes := Nodes} = State) ->
+oscillation(
+    #{
+        root := #{
+            rate := Flow,
+            period := Interval,
+            produced := Produced
+        } = Root,
+        buckets := Buckets
+    } = State
+) ->
     oscillate(Interval),
-    Childs = get_ordered_childs(ChildIds, Nodes),
-    {Alloced, Nodes2} = transverse(Childs, Flow, 0, Nodes),
-    maybe_burst(State#{nodes := Nodes2,
-                       root := Root#{consumed := Consumed + Alloced}}).
+    Ordereds = get_ordered_buckets(Buckets),
+    {Alloced, Buckets2} = transverse(Ordereds, Flow, 0.0, Buckets),
+    maybe_burst(State#{
+        buckets := Buckets2,
+        root := Root#{produced := Produced + Alloced}
+    }).
 
 %% @doc horizontal spread
--spec transverse(list(node_data()),
-                 flow(),
-                 non_neg_integer(),
-                 nodes()) -> {non_neg_integer(), nodes()}.
-transverse([H | T], InFlow, Alloced, Nodes) when InFlow > 0 ->
-    {NodeAlloced, Nodes2} = longitudinal(H, InFlow, Nodes),
-    InFlow2 = sub(InFlow, NodeAlloced),
-    Alloced2 = Alloced + NodeAlloced,
-    transverse(T, InFlow2, Alloced2, Nodes2);
-
-transverse(_, _, Alloced, Nodes) ->
-    {Alloced, Nodes}.
+-spec transverse(
+    list(bucket()),
+    flow(),
+    float(),
+    buckets()
+) -> {float(), buckets()}.
+transverse([H | T], InFlow, Alloced, Buckets) when InFlow > 0 ->
+    {BucketAlloced, Buckets2} = longitudinal(H, InFlow, Buckets),
+    InFlow2 = sub(InFlow, BucketAlloced),
+    Alloced2 = Alloced + BucketAlloced,
+    transverse(T, InFlow2, Alloced2, Buckets2);
+transverse(_, _, Alloced, Buckets) ->
+    {Alloced, Buckets}.
 
 %% @doc vertical spread
--spec longitudinal(node_data(), flow(), nodes()) ->
-          {non_neg_integer(), nodes()}.
-longitudinal(#{id := Id,
-               rate := Rate,
-               obtained := Obtained,
-               childs := ChildIds} = Node, InFlow, Nodes) ->
-    Flow = erlang:min(InFlow, Rate),
-
-    if Flow > 0 ->
-            Childs = get_ordered_childs(ChildIds, Nodes),
-            {Alloced, Nodes2} = transverse(Childs, Flow, 0, Nodes),
-            if Alloced > 0 ->
-                    {Alloced,
-                     Nodes2#{Id => Node#{obtained := Obtained + Alloced}}};
-               true ->
-                    %% childs are empty or all counter childs are full
-                    {0, Nodes2}
-            end;
-       true ->
-            {0, Nodes}
-    end;
-
-longitudinal(#{id := Id,
-               rate := Rate,
-               capacity := Capacity,
-               counter := Counter,
-               index := Index,
-               obtained := Obtained} = Node,
-             InFlow, Nodes) when Counter =/= undefined ->
+-spec longitudinal(bucket(), flow(), buckets()) ->
+    {float(), buckets()}.
+longitudinal(
+    #{
+        name := Name,
+        rate := Rate,
+        capacity := Capacity,
+        counter := Counter,
+        index := Index,
+        obtained := Obtained
+    } = Bucket,
+    InFlow,
+    Buckets
+) when Counter =/= undefined ->
     Flow = erlang:min(InFlow, Rate),
 
     ShouldAlloc =
@@ -330,8 +378,10 @@ longitudinal(#{id := Id,
             Tokens when Tokens < 0 ->
                 %% toknes's value mayb be a negative value(stolen from the future)
                 %% because ∃ x. add(Capacity, x) < 0, so here we must compare with minimum value
-                erlang:max(add(Capacity, Tokens),
-                           mul(Capacity, ?OVERLOAD_MIN_ALLOC));
+                erlang:max(
+                    add(Capacity, Tokens),
+                    mul(Capacity, ?OVERLOAD_MIN_ALLOC)
+                );
             Tokens ->
                 %% is it possible that Tokens > Capacity ???
                 erlang:max(sub(Capacity, Tokens), 0)
@@ -339,253 +389,199 @@ longitudinal(#{id := Id,
 
     case lists:min([ShouldAlloc, Flow, Capacity]) of
         Available when Available > 0 ->
-            %% XXX if capacity is infinity, and flow always > 0, the value in
-            %% counter will be overflow at some point in the future, do we need
-            %% to deal with this situation???
-            {Inc, Node2} = emqx_limiter_correction:add(Available, Node),
+            {Inc, Bucket2} = emqx_limiter_correction:add(Available, Bucket),
             counters:add(Counter, Index, Inc),
 
-            {Inc,
-             Nodes#{Id := Node2#{obtained := Obtained + Inc}}};
+            {Available, Buckets#{Name := Bucket2#{obtained := Obtained + Available}}};
         _ ->
-            {0, Nodes}
+            {0, Buckets}
     end;
+longitudinal(_, _, Buckets) ->
+    {0, Buckets}.
 
-longitudinal(_, _, Nodes) ->
-    {0, Nodes}.
-
--spec get_ordered_childs(list(node_id()), nodes()) -> list(node_data()).
-get_ordered_childs(Ids, Nodes) ->
-    Childs = [maps:get(Id, Nodes) || Id <- Ids],
-
+-spec get_ordered_buckets(list(bucket()) | buckets()) -> list(bucket()).
+get_ordered_buckets(Buckets) when is_map(Buckets) ->
+    BucketList = maps:values(Buckets),
+    get_ordered_buckets(BucketList);
+get_ordered_buckets(Buckets) ->
     %% sort by obtained, avoid node goes hungry
-    lists:sort(fun(#{obtained := A}, #{obtained := B}) ->
-                       A < B
-               end,
-               Childs).
+    lists:sort(
+        fun(#{obtained := A}, #{obtained := B}) ->
+            A < B
+        end,
+        Buckets
+    ).
 
 -spec maybe_burst(state()) -> state().
-maybe_burst(#{buckets := Buckets,
-              zones := Zones,
-              root := #{burst := Burst},
-              nodes := Nodes} = State) when Burst > 0 ->
-    %% find empty buckets and group by zone name
-    GroupFun = fun(Id, Groups) ->
-                       #{counter := Counter,
-                         index := Index,
-                         zone := Zone} = maps:get(Id, Nodes),
-                       case counters:get(Counter, Index) of
-                           Any when Any =< 0 ->
-                               Group = maps:get(Zone, Groups, []),
-                               maps:put(Zone, [Id | Group], Groups);
-                           _ ->
-                               Groups
-                       end
-               end,
+maybe_burst(
+    #{
+        buckets := Buckets,
+        root := #{burst := Burst}
+    } = State
+) when Burst > 0 ->
+    Fold = fun
+        (_Name, #{counter := Cnt, index := Idx} = Bucket, Acc) when Cnt =/= undefined ->
+            case counters:get(Cnt, Idx) > 0 of
+                true ->
+                    Acc;
+                false ->
+                    [Bucket | Acc]
+            end;
+        (_Name, _Bucket, Acc) ->
+            Acc
+    end,
 
-    case lists:foldl(GroupFun, #{}, Buckets) of
-        Groups when map_size(Groups) > 0 ->
-            %% remove the zone which don't support burst
-            Filter = fun({Name, Childs}, Acc) ->
-                             ZoneId = maps:get(Name, Zones),
-                             #{burst := ZoneBurst} = Zone = maps:get(ZoneId, Nodes),
-                             case ZoneBurst > 0 of
-                                 true ->
-                                     [{Zone, Childs} | Acc];
-                                 _ ->
-                                     Acc
-                             end
-                     end,
-
-            FilterL = lists:foldl(Filter, [], maps:to_list(Groups)),
-            dispatch_burst(FilterL, State);
-        _ ->
-            State
-    end;
-
+    Empties = maps:fold(Fold, [], Buckets),
+    dispatch_burst(Empties, Burst, State);
 maybe_burst(State) ->
     State.
 
--spec dispatch_burst(list({zone(), list(node_id())}), state()) -> state().
-dispatch_burst([], State) ->
+-spec dispatch_burst(list(bucket()), non_neg_integer(), state()) -> state().
+dispatch_burst([], _, State) ->
     State;
+dispatch_burst(
+    Empties,
+    InFlow,
+    #{root := #{produced := Produced} = Root, buckets := Buckets} = State
+) ->
+    EachFlow = InFlow / erlang:length(Empties),
+    {Alloced, Buckets2} = dispatch_burst_to_buckets(Empties, EachFlow, 0, Buckets),
+    State#{root := Root#{produced := Produced + Alloced}, buckets := Buckets2}.
 
-dispatch_burst(GroupL,
-               #{root := #{burst := Burst},
-                 nodes := Nodes} = State) ->
-    InFlow = Burst / erlang:length(GroupL),
-    Dispatch = fun({Zone, Childs}, NodeAcc) ->
-                       #{id := ZoneId,
-                         burst := ZoneBurst,
-                         obtained := Obtained} = Zone,
-
-                       case erlang:min(InFlow, ZoneBurst) of
-                           0 -> NodeAcc;
-                           ZoneFlow ->
-                               EachFlow = ZoneFlow / erlang:length(Childs),
-                               {Alloced, NodeAcc2} = dispatch_burst_to_buckets(Childs, EachFlow, 0, NodeAcc),
-                               Zone2 = Zone#{obtained := Obtained + Alloced},
-                               NodeAcc2#{ZoneId := Zone2}
-                       end
-               end,
-    State#{nodes := lists:foldl(Dispatch, Nodes, GroupL)}.
-
--spec dispatch_burst_to_buckets(list(node_id()),
-                                float(), non_neg_integer(), nodes()) -> {non_neg_integer(), nodes()}.
-dispatch_burst_to_buckets([ChildId | T], InFlow, Alloced, Nodes) ->
-    #{counter := Counter,
-      index := Index,
-      obtained := Obtained} = Bucket = maps:get(ChildId, Nodes),
+-spec dispatch_burst_to_buckets(
+    list(bucket()),
+    float(),
+    non_neg_integer(),
+    buckets()
+) -> {non_neg_integer(), buckets()}.
+dispatch_burst_to_buckets([Bucket | T], InFlow, Alloced, Buckets) ->
+    #{
+        name := Name,
+        counter := Counter,
+        index := Index,
+        obtained := Obtained
+    } = Bucket,
     {Inc, Bucket2} = emqx_limiter_correction:add(InFlow, Bucket),
 
     counters:add(Counter, Index, Inc),
 
-    Nodes2 = Nodes#{ChildId := Bucket2#{obtained := Obtained + Inc}},
-    dispatch_burst_to_buckets(T, InFlow, Alloced + Inc, Nodes2);
+    Buckets2 = Buckets#{Name := Bucket2#{obtained := Obtained + Inc}},
+    dispatch_burst_to_buckets(T, InFlow, Alloced + Inc, Buckets2);
+dispatch_burst_to_buckets([], _, Alloced, Buckets) ->
+    {Alloced, Buckets}.
 
-dispatch_burst_to_buckets([], _, Alloced, Nodes) ->
-    {Alloced, Nodes}.
+-spec init_tree(emqx_limiter_schema:limiter_type()) -> state().
+init_tree(Type) when is_atom(Type) ->
+    Cfg = emqx:get_config([limiter, Type]),
+    init_tree(Type, Cfg).
 
--spec init_tree(emqx_limiter_schema:limiter_type(), state()) -> state().
-init_tree(Type, State) ->
-    #{global := Global,
-      zone := Zone,
-      bucket := Bucket} = emqx:get_config([limiter, Type]),
-    {Factor, Root} = make_root(Global, Zone),
-    State2 = State#{root := Root},
-    {NodeId, State3} = make_zone(maps:to_list(Zone), Factor, 1, State2),
-    State4 = State3#{counter := counters:new(maps:size(Bucket),
-                                             [write_concurrency])},
-    make_bucket(maps:to_list(Bucket), Global, Zone, Factor, NodeId, [], State4).
+init_tree(Type, Cfg) ->
+    #{
+        type => Type,
+        root => make_root(Cfg),
+        counter => counters:new(?COUNTER_SIZE, [write_concurrency]),
+        index => 0,
+        buckets => #{}
+    }.
 
--spec make_root(hocons:confg(), hocon:config()) -> {number(), root()}.
-make_root(#{rate := Rate, burst := Burst}, Zone) ->
-    ZoneNum = maps:size(Zone),
-    Childs = lists:seq(1, ZoneNum),
-    MiniPeriod = emqx_limiter_schema:minimum_period(),
-    if Rate >= 1 ->
-            {1, #{rate => Rate,
-                  burst => Burst,
-                  period => MiniPeriod,
-                  childs => Childs,
-                  consumed => 0}};
-       true ->
-            Factor = 1 / Rate,
-            {Factor, #{rate => 1,
-                       burst => Burst * Factor,
-                       period => erlang:floor(Factor * MiniPeriod),
-                       childs => Childs,
-                       consumed => 0}}
+-spec make_root(hocons:confg()) -> root().
+make_root(#{rate := Rate, burst := Burst}) ->
+    #{
+        rate => Rate,
+        burst => Burst,
+        period => emqx_limiter_schema:default_period(),
+        produced => 0.0
+    }.
+
+do_add_bucket(Id, #{rate := Rate, capacity := Capacity} = Cfg, #{buckets := Buckets} = State) ->
+    case maps:get(Id, Buckets, undefined) of
+        undefined ->
+            make_bucket(Id, Cfg, State);
+        Bucket ->
+            Bucket2 = Bucket#{rate := Rate, capacity := Capacity},
+            State#{buckets := Buckets#{Id := Bucket2}}
     end.
 
-make_zone([{Name, ZoneCfg} | T], Factor, NodeId, State) ->
-    #{rate := Rate, burst := Burst} = ZoneCfg,
-    #{zones := Zones, nodes := Nodes} = State,
-    Zone = #{id => NodeId,
-             name => Name,
-             rate => mul(Rate, Factor),
-             burst => Burst,
-             obtained => 0,
-             childs => []},
-    State2 = State#{zones := Zones#{Name => NodeId},
-                    nodes := Nodes#{NodeId => Zone}},
-    make_zone(T, Factor, NodeId + 1, State2);
+make_bucket(Id, Cfg, #{index := ?COUNTER_SIZE} = State) ->
+    make_bucket(Id, Cfg, State#{
+        counter => counters:new(?COUNTER_SIZE, [write_concurrency]),
+        index => 0
+    });
+make_bucket(
+    Id,
+    #{rate := Rate, capacity := Capacity} = Cfg,
+    #{type := Type, counter := Counter, index := Index, buckets := Buckets} = State
+) ->
+    NewIndex = Index + 1,
+    Initial = get_initial_val(Cfg),
+    Bucket = #{
+        name => Id,
+        rate => Rate,
+        obtained => Initial,
+        correction => 0,
+        capacity => Capacity,
+        counter => Counter,
+        index => NewIndex
+    },
+    _ = put_to_counter(Counter, NewIndex, Initial),
+    Ref = emqx_limiter_bucket_ref:new(Counter, NewIndex, Rate),
+    emqx_limiter_manager:insert_bucket(Id, Type, Ref),
+    State#{buckets := Buckets#{Id => Bucket}, index := NewIndex}.
 
-make_zone([], _, NodeId, State2) ->
-    {NodeId, State2}.
-
-make_bucket([{Name, Conf} | T], Global, Zone, Factor, Id, Buckets, #{type := Type} = State) ->
-    #{zone := ZoneName,
-      aggregated := Aggregated} = Conf,
-    Path = emqx_limiter_manager:make_path(Type, ZoneName, Name),
-    case get_counter_rate(Conf, Zone, Global) of
-          infinity ->
-              State2 = State,
-              Rate = infinity,
-              Capacity = infinity,
-              Counter = undefined,
-              Index = undefined,
-              Ref = emqx_limiter_bucket_ref:new(Counter, Index, Rate),
-              emqx_limiter_manager:insert_bucket(Path, Ref);
-        RawRate ->
-            #{capacity := Capacity} = Aggregated,
-            Initial = get_initial_val(Aggregated),
-            {Counter, Index, State2} = alloc_counter(Path, RawRate, Initial, State),
-            Rate = mul(RawRate, Factor)
-    end,
-
-    Node = #{ id => Id
-            , name => Name
-            , zone => ZoneName
-            , rate => Rate
-            , obtained => 0
-            , correction => 0
-            , capacity => Capacity
-            , counter => Counter
-            , index => Index},
-
-    State3 = add_zone_child(Id, Node, ZoneName, State2),
-    make_bucket(T, Global, Zone, Factor, Id + 1, [Id | Buckets], State3);
-
-make_bucket([], _, _, _, _, Buckets, State) ->
-    State#{buckets := Buckets}.
-
--spec alloc_counter(emqx_limiter_manager:path(), rate(), capacity(), state()) ->
-          {counters:counters_ref(), pos_integer(), state()}.
-alloc_counter(Path, Rate, Initial,
-              #{counter := Counter, index := Index} = State) ->
-    case emqx_limiter_manager:find_bucket(Path) of
-        {ok, #{counter := ECounter,
-               index := EIndex}} when ECounter =/= undefined ->
-            init_counter(Path, ECounter, EIndex, Rate, Initial, State);
+do_del_bucket(Id, #{type := Type, buckets := Buckets} = State) ->
+    case maps:get(Id, Buckets, undefined) of
+        undefined ->
+            State;
         _ ->
-            init_counter(Path, Counter, Index,
-                         Rate, Initial, State#{index := Index + 1})
+            emqx_limiter_manager:delete_bucket(Id, Type),
+            State#{buckets := maps:remove(Id, Buckets)}
     end.
 
-init_counter(Path, Counter, Index, Rate, Initial, State) ->
-    _ = put_to_counter(Counter, Index, Initial),
-    Ref = emqx_limiter_bucket_ref:new(Counter, Index, Rate),
-    emqx_limiter_manager:insert_bucket(Path, Ref),
-    {Counter, Index, State}.
-
--spec add_zone_child(node_id(), bucket(), zone_name(), state()) -> state().
-add_zone_child(NodeId, Bucket, Name, #{zones := Zones, nodes := Nodes} = State) ->
-    ZoneId = maps:get(Name, Zones),
-    #{childs := Childs} = Zone = maps:get(ZoneId, Nodes),
-    Nodes2 = Nodes#{ZoneId => Zone#{childs := [NodeId | Childs]},
-                    NodeId => Bucket},
-    State#{nodes := Nodes2}.
-
-%% @doc find first limited node
-get_counter_rate(#{zone := ZoneName,
-                   aggregated := Cfg}, ZoneCfg, Global) ->
-    Zone = maps:get(ZoneName, ZoneCfg),
-    Search = lists:search(fun(E) -> is_limited(E) end,
-                          [Cfg, Zone, Global]),
-    case Search of
-        {value, #{rate := Rate}} ->
-            Rate;
-        false ->
-            infinity
-    end.
-
-is_limited(#{rate := Rate, capacity := Capacity}) ->
-    Rate =/= infinity orelse Capacity =/= infinity;
-
-is_limited(#{rate := Rate}) ->
-    Rate =/= infinity.
-
-get_initial_val(#{initial := Initial,
-                  rate := Rate,
-                  capacity := Capacity}) ->
+-spec get_initial_val(hocons:config()) -> decimal().
+get_initial_val(
+    #{
+        initial := Initial,
+        rate := Rate,
+        capacity := Capacity
+    }
+) ->
     %% initial will nevner be infinity(see the emqx_limiter_schema)
-    if Initial > 0 ->
+    InfVal = emqx_limiter_schema:infinity_value(),
+    if
+        Initial > 0 ->
             Initial;
-       Rate =/= infinity ->
+        Rate =/= infinity ->
             erlang:min(Rate, Capacity);
-       Capacity =/= infinity ->
+        Capacity =/= infinity andalso Capacity =/= InfVal ->
             Capacity;
-       true ->
+        true ->
             0
     end.
+
+-spec call(limiter_type(), any()) -> {error, _} | _.
+call(Type, Msg) ->
+    case ?MODULE:whereis(Type) of
+        undefined ->
+            {error, limiter_not_started};
+        Pid ->
+            gen_server:call(Pid, Msg)
+    end.
+
+find_limiter_cfg(Type, #{rate := _} = Cfg) ->
+    {Cfg, find_client_cfg(Type, maps:get(client, Cfg, undefined))};
+find_limiter_cfg(Type, Cfg) ->
+    {
+        maps:get(Type, Cfg, undefined),
+        find_client_cfg(Type, emqx_map_lib:deep_get([client, Type], Cfg, undefined))
+    }.
+
+find_client_cfg(Type, BucketCfg) ->
+    NodeCfg = emqx:get_config([limiter, client, Type], undefined),
+    merge_client_cfg(NodeCfg, BucketCfg).
+
+merge_client_cfg(undefined, BucketCfg) ->
+    BucketCfg;
+merge_client_cfg(NodeCfg, undefined) ->
+    NodeCfg;
+merge_client_cfg(NodeCfg, BucketCfg) ->
+    maps:merge(NodeCfg, BucketCfg).

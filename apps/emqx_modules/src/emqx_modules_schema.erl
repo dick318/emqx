@@ -16,91 +16,72 @@
 
 -module(emqx_modules_schema).
 
+-include_lib("hocon/include/hoconsc.hrl").
 -include_lib("typerefl/include/types.hrl").
 
 -behaviour(hocon_schema).
 
--export([ namespace/0
-        , roots/0
-        , fields/1]).
+-export([
+    namespace/0,
+    roots/0,
+    fields/1,
+    desc/1
+]).
 
 namespace() -> modules.
 
 roots() ->
-    ["delayed",
-     "telemetry",
-     "event_message",
-     array("rewrite"),
-     array("topic_metrics")].
+    [
+        "delayed",
+        "telemetry",
+        array("rewrite", #{desc => "List of topic rewrite rules."}),
+        array("topic_metrics", #{desc => "List of topics whose metrics are reported."})
+    ].
 
 fields("telemetry") ->
-    [ {enable, hoconsc:mk(boolean(), #{default => false})}
-    ];
-
+    [{enable, ?HOCON(boolean(), #{default => true, desc => "Enable telemetry."})}];
 fields("delayed") ->
-    [ {enable, hoconsc:mk(boolean(), #{default => false})}
-    , {max_delayed_messages, sc(integer(), #{})}
+    [
+        {enable, ?HOCON(boolean(), #{default => true, desc => ?DESC(enable)})},
+        {max_delayed_messages,
+            ?HOCON(integer(), #{desc => ?DESC(max_delayed_messages), default => 0})}
     ];
-
 fields("rewrite") ->
-    [ { action
-      , sc( hoconsc:enum([subscribe, publish, all])
-          , #{desc => <<"Action">>, example => publish})}
-    , { source_topic
-      , sc( binary()
-          , #{desc => <<"Origin Topic">>, example => "x/#"})}
-    , { dest_topic
-      , sc( binary()
-          , #{desc => <<"Destination Topic">>, example => "z/y/$1"})}
-    , { re, fun regular_expression/1 }
+    [
+        {action,
+            ?HOCON(
+                hoconsc:enum([subscribe, publish, all]),
+                #{required => true, desc => ?DESC(tr_action), example => publish}
+            )},
+        {source_topic,
+            ?HOCON(
+                binary(),
+                #{required => true, desc => ?DESC(tr_source_topic), example => "x/#"}
+            )},
+        {dest_topic,
+            ?HOCON(
+                binary(),
+                #{required => true, desc => ?DESC(tr_dest_topic), example => "z/y/$1"}
+            )},
+        {re, fun regular_expression/1}
     ];
-
-
-fields("event_message") ->
-    Fields =
-        [ { client_connected
-        , sc( boolean()
-            , #{desc => <<"Enable/disable client_connected event messages">>,
-                default => false})}
-        , { client_disconnected
-        , sc(boolean()
-            , #{desc => <<"Enable/disable client_disconnected event messages">>,
-                default => false})}
-        , { client_subscribed
-        , sc( boolean()
-            , #{desc => <<"Enable/disable client_subscribed event messages">>,
-                default => false})}
-        , { client_unsubscribed
-        , sc( boolean()
-            , #{desc => <<"Enable/disable client_unsubscribed event messages">>,
-                default => false})}
-        , { message_delivered
-        , sc( boolean()
-            , #{desc => <<"Enable/disable message_delivered event messages">>,
-                default => false})}
-        , { message_acked
-        , sc( boolean()
-            , #{desc => <<"Enable/disable message_acked event messages">>,
-                default => false})}
-        , { message_dropped
-        , sc( boolean()
-            , #{desc => <<"Enable/disable message_dropped event messages">>,
-                default => false})}
-        ],
-    #{fields => Fields,
-      desc => """
-Enable/Disable system event messages.
-The messages are published to '$event' prefixed topics.
-For example, if `client_disconnected` is set to `true`,
-a message is published to `$event/client_connected` topic
-whenever a client is connected.
-"""};
-
 fields("topic_metrics") ->
-    [{topic, sc(binary(), #{})}].
+    [{topic, ?HOCON(binary(), #{desc => "Collect metrics for the topic."})}].
+
+desc("telemetry") ->
+    "Settings for the telemetry module.";
+desc("delayed") ->
+    "Settings for the delayed module.";
+desc("rewrite") ->
+    ?DESC(rewrite);
+desc("topic_metrics") ->
+    "";
+desc(_) ->
+    undefined.
 
 regular_expression(type) -> binary();
-regular_expression(desc) -> "Regular expressions";
+regular_expression(required) -> true;
+regular_expression(desc) -> ?DESC(tr_re);
 regular_expression(example) -> "^x/y/(.+)$";
 regular_expression(validator) -> fun is_re/1;
 regular_expression(_) -> undefined.
@@ -111,6 +92,4 @@ is_re(Bin) ->
         {error, Reason} -> {error, {Bin, Reason}}
     end.
 
-array(Name) -> {Name, hoconsc:array(hoconsc:ref(?MODULE, Name))}.
-
-sc(Type, Meta) -> hoconsc:mk(Type, Meta).
+array(Name, Meta) -> {Name, ?HOCON(?ARRAY(?R_REF(Name)), Meta)}.

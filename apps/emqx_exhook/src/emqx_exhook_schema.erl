@@ -23,70 +23,117 @@
 -dialyzer(no_fail_call).
 
 -include_lib("typerefl/include/types.hrl").
+-include_lib("hocon/include/hoconsc.hrl").
 
 -behaviour(hocon_schema).
 
--type duration() :: integer().
-
--typerefl_from_string({duration/0, emqx_schema, to_duration}).
-
--reflect_type([duration/0]).
-
--export([namespace/0, roots/0, fields/1, server_config/0]).
+-export([namespace/0, roots/0, fields/1, desc/1, server_config/0]).
 
 namespace() -> exhook.
 
 roots() -> [exhook].
 
 fields(exhook) ->
-    [{servers,
-      sc(hoconsc:array(ref(server)),
-          #{default => []})}
+    [
+        {servers,
+            ?HOCON(?ARRAY(?R_REF(server)), #{
+                default => [],
+                desc => ?DESC(servers)
+            })}
     ];
-
 fields(server) ->
-    [ {name, sc(binary(), #{})}
-    , {enable, sc(boolean(), #{default => true})}
-    , {url, sc(binary(), #{})}
-    , {request_timeout,
-       sc(duration(), #{default => "5s"})}
-    , {failed_action, failed_action()}
-    , {ssl,
-       sc(ref(ssl_conf), #{})}
-    , {auto_reconnect,
-       sc(hoconsc:union([false, duration()]),
-          #{default => "60s"})}
-    , {pool_size,
-       sc(integer(), #{default => 8, example => 8})}
+    [
+        {name,
+            ?HOCON(binary(), #{
+                example => <<"default">>,
+                required => true,
+                validator => fun validate_name/1,
+                desc => ?DESC(name)
+            })},
+        {enable,
+            ?HOCON(boolean(), #{
+                default => true,
+                desc => ?DESC(enable)
+            })},
+        {url,
+            ?HOCON(binary(), #{
+                required => true,
+                desc => ?DESC(url),
+                example => <<"http://127.0.0.1:9000">>
+            })},
+        {request_timeout,
+            ?HOCON(emqx_schema:duration(), #{
+                default => "5s",
+                desc => ?DESC(request_timeout)
+            })},
+        {failed_action, failed_action()},
+        {ssl, ?HOCON(?R_REF(ssl_conf), #{})},
+        {socket_options,
+            ?HOCON(?R_REF(socket_options), #{
+                default => #{<<"keepalive">> => true, <<"nodelay">> => true}
+            })},
+        {auto_reconnect,
+            ?HOCON(hoconsc:union([false, emqx_schema:duration()]), #{
+                default => "60s",
+                desc => ?DESC(auto_reconnect)
+            })},
+        {pool_size,
+            ?HOCON(pos_integer(), #{
+                default => 8,
+                desc => ?DESC(pool_size)
+            })}
     ];
-
 fields(ssl_conf) ->
-    [ {enable, sc(boolean(), #{default => true})}
-    , {cacertfile,
-       sc(binary(),
-          #{example => <<"{{ platform_etc_dir }}/certs/cacert.pem">>})
-      }
-    , {certfile,
-       sc(binary(),
-          #{example => <<"{{ platform_etc_dir }}/certs/cert.pem">>})
-      }
-    , {keyfile,
-       sc(binary(),
-          #{example => <<"{{ platform_etc_dir }}/certs/key.pem">>})}
-    , {verify,
-       sc(hoconsc:enum([verify_peer, verify_none]),
-          #{example => <<"verify_none">>})}
+    Schema = emqx_schema:client_ssl_opts_schema(#{}),
+    lists:keydelete("user_lookup_fun", 1, Schema);
+fields(socket_options) ->
+    [
+        {keepalive, ?HOCON(boolean(), #{default => true, desc => ?DESC(keepalive)})},
+        {nodelay, ?HOCON(boolean(), #{default => true, desc => ?DESC(nodelay)})},
+        {recbuf,
+            ?HOCON(emqx_schema:bytesize(), #{
+                desc => ?DESC(recbuf), required => false, example => <<"64KB">>
+            })},
+        {sndbuf,
+            ?HOCON(emqx_schema:bytesize(), #{
+                desc => ?DESC(sndbuf), required => false, example => <<"16KB">>
+            })}
     ].
 
-%% types
-sc(Type, Meta) -> Meta#{type => Type}.
-
-ref(Field) ->
-    hoconsc:ref(?MODULE, Field).
+desc(exhook) ->
+    "External hook (exhook) configuration.";
+desc(server) ->
+    "gRPC server configuration.";
+desc(ssl_conf) ->
+    "SSL client configuration.";
+desc(socket_options) ->
+    ?DESC(socket_options);
+desc(_) ->
+    undefined.
 
 failed_action() ->
-    sc(hoconsc:enum([deny, ignore]),
-       #{default => deny}).
+    ?HOCON(?ENUM([deny, ignore]), #{
+        default => deny,
+        desc => ?DESC(failed_action)
+    }).
+
+validate_name(Name) ->
+    NameRE = "^[A-Za-z0-9]+[A-Za-z0-9-_]*$",
+    NameLen = byte_size(Name),
+    case NameLen > 0 andalso NameLen =< 256 of
+        true ->
+            case re:run(Name, NameRE) of
+                {match, _} ->
+                    ok;
+                _NoMatch ->
+                    Reason = list_to_binary(
+                        io_lib:format("Bad ExHook Name ~p, expect ~p", [Name, NameRE])
+                    ),
+                    {error, Reason}
+            end;
+        false ->
+            {error, "Name Length must =< 256"}
+    end.
 
 server_config() ->
     fields(server).

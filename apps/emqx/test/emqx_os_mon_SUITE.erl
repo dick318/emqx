@@ -25,17 +25,20 @@ all() -> emqx_common_test_helpers:all(?MODULE).
 
 init_per_suite(Config) ->
     emqx_common_test_helpers:boot_modules(all),
-    emqx_common_test_helpers:start_apps([],
-        fun(emqx) ->
-            application:set_env(emqx, os_mon, [
-                {cpu_check_interval, 1},
-                {cpu_high_watermark, 5},
-                {cpu_low_watermark, 80},
-                {mem_check_interval, 60},
-                {sysmem_high_watermark, 70},
-                {procmem_high_watermark, 5}]);
-            (_) -> ok
-        end),
+    emqx_common_test_helpers:start_apps(
+        [],
+        fun
+            (emqx) ->
+                application:set_env(emqx, os_mon, [
+                    {cpu_check_interval, 1},
+                    {cpu_high_watermark, 5},
+                    {cpu_low_watermark, 80},
+                    {procmem_high_watermark, 5}
+                ]);
+            (_) ->
+                ok
+        end
+    ),
     Config.
 
 end_per_suite(_Config) ->
@@ -48,16 +51,18 @@ t_api(_) ->
     ?assertEqual(ok, emqx_os_mon:set_mem_check_interval(122000)),
     ?assertEqual(120000, emqx_os_mon:get_mem_check_interval()),
 
-    ?assertEqual(70, emqx_os_mon:get_sysmem_high_watermark()),
+    ?assertEqual(0.7, emqx_os_mon:get_sysmem_high_watermark()),
     ?assertEqual(ok, emqx_os_mon:set_sysmem_high_watermark(0.8)),
-    ?assertEqual(80, emqx_os_mon:get_sysmem_high_watermark()),
+    ?assertEqual(0.8, emqx_os_mon:get_sysmem_high_watermark()),
 
     ?assertEqual(5, emqx_os_mon:get_procmem_high_watermark()),
     ?assertEqual(ok, emqx_os_mon:set_procmem_high_watermark(0.11)),
     ?assertEqual(11, emqx_os_mon:get_procmem_high_watermark()),
 
-    ?assertEqual({error, {unexpected_call, ignored}},
-                 gen_server:call(emqx_os_mon, ignored)),
+    ?assertEqual(
+        {error, {unexpected_call, ignored}},
+        gen_server:call(emqx_os_mon, ignored)
+    ),
     ?assertEqual(ok, gen_server:cast(emqx_os_mon, ignored)),
     emqx_os_mon ! ignored,
     gen_server:stop(emqx_os_mon),

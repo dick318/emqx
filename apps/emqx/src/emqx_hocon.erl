@@ -17,30 +17,32 @@
 %% @doc HOCON schema help module
 -module(emqx_hocon).
 
--export([ format_path/1
-        , check/2
-        ]).
+-export([
+    format_path/1,
+    check/2,
+    format_error/1,
+    format_error/2
+]).
 
 %% @doc Format hocon config field path to dot-separated string in iolist format.
 -spec format_path([atom() | string() | binary()]) -> iolist().
 format_path([]) -> "";
 format_path([Name]) -> iol(Name);
-format_path([Name | Rest]) ->
-    [iol(Name) , "." | format_path(Rest)].
+format_path([Name | Rest]) -> [iol(Name), "." | format_path(Rest)].
 
 %% @doc Plain check the input config.
 %% The input can either be `richmap' or plain `map'.
 %% Always return plain map with atom keys.
 -spec check(module(), hocon:config() | iodata()) ->
-        {ok, hocon:config()} | {error, any()}.
+    {ok, hocon:config()} | {error, any()}.
 check(SchemaModule, Conf) when is_map(Conf) ->
-    %% TODO: remove nullable
-    %% fields should state nullable or not in their schema
-    Opts = #{atom_key => true, nullable => true},
+    %% TODO: remove required
+    %% fields should state required or not in their schema
+    Opts = #{atom_key => true, required => false},
     try
         {ok, hocon_tconf:check_plain(SchemaModule, Conf, Opts)}
     catch
-        throw : Reason ->
+        throw:Reason ->
             {error, Reason}
     end;
 check(SchemaModule, HoconText) ->
@@ -51,7 +53,36 @@ check(SchemaModule, HoconText) ->
             {error, Reason}
     end.
 
+%% @doc Check if the error error term is a hocon check error.
+%% Return {true, FirstError}, otherwise false.
+%% NOTE: Hocon tries to be comprehensive, so it returns all found errors
+-spec format_error(term()) -> {ok, binary()} | false.
+format_error(X) ->
+    format_error(X, #{}).
+
+format_error({_Schema, [#{kind := K} = First | Rest] = All}, Opts) when
+    K =:= validation_error orelse K =:= translation_error
+->
+    Update =
+        case maps:get(no_stacktrace, Opts, false) of
+            true ->
+                fun no_stacktrace/1;
+            false ->
+                fun(X) -> X end
+        end,
+    case Rest of
+        [] ->
+            {ok, emqx_logger_jsonfmt:best_effort_json(Update(First), [])};
+        _ ->
+            {ok, emqx_logger_jsonfmt:best_effort_json(lists:map(Update, All), [])}
+    end;
+format_error(_Other, _) ->
+    false.
+
 %% Ensure iolist()
 iol(B) when is_binary(B) -> B;
 iol(A) when is_atom(A) -> atom_to_binary(A, utf8);
 iol(L) when is_list(L) -> L.
+
+no_stacktrace(Map) ->
+    maps:without([stacktrace], Map).

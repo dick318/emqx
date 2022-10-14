@@ -21,11 +21,14 @@
 -compile(export_all).
 -compile(nowarn_export_all).
 
--define(CONF_DEFAULT, <<"""
-gateway: {
-    stomp {}
-}
-""">>).
+-define(CONF_DEFAULT, <<
+    ""
+    "\n"
+    "gateway: {\n"
+    "    stomp {}\n"
+    "}\n"
+    ""
+>>).
 
 all() -> emqx_common_test_helpers:all(?MODULE).
 
@@ -35,11 +38,11 @@ all() -> emqx_common_test_helpers:all(?MODULE).
 
 init_per_suite(Cfg) ->
     ok = emqx_common_test_helpers:load_config(emqx_gateway_schema, ?CONF_DEFAULT),
-    emqx_common_test_helpers:start_apps([emqx_gateway]),
+    emqx_common_test_helpers:start_apps([emqx_authn, emqx_gateway]),
     Cfg.
 
 end_per_suite(_Cfg) ->
-    emqx_common_test_helpers:stop_apps([emqx_gateway]),
+    emqx_common_test_helpers:stop_apps([emqx_gateway, emqx_authn]),
     ok.
 
 %%--------------------------------------------------------------------
@@ -50,10 +53,12 @@ t_load_unload(_) ->
     OldCnt = length(emqx_gateway_registry:list()),
     RgOpts = [{cbkmod, ?MODULE}],
     ok = emqx_gateway_registry:reg(test, RgOpts),
-    ?assertEqual(OldCnt+1, length(emqx_gateway_registry:list())),
+    ?assertEqual(OldCnt + 1, length(emqx_gateway_registry:list())),
 
-    #{cbkmod := ?MODULE,
-      rgopts := RgOpts} = emqx_gateway_registry:lookup(test),
+    #{
+        cbkmod := ?MODULE,
+        rgopts := RgOpts
+    } = emqx_gateway_registry:lookup(test),
 
     {error, already_existed} = emqx_gateway_registry:reg(test, [{cbkmod, ?MODULE}]),
 

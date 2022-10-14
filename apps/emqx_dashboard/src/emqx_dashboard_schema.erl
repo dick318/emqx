@@ -15,90 +15,212 @@
 %%--------------------------------------------------------------------
 -module(emqx_dashboard_schema).
 
--include_lib("typerefl/include/types.hrl").
+-include_lib("hocon/include/hoconsc.hrl").
 
--export([ roots/0
-        , fields/1
-        ,namespace/0]).
+-export([
+    roots/0,
+    fields/1,
+    namespace/0,
+    desc/1
+]).
 
-namespace() -> <<"dashboard">>.
+namespace() -> dashboard.
 roots() -> ["dashboard"].
 
 fields("dashboard") ->
-    [ {listeners,
-        sc(hoconsc:array(hoconsc:union([hoconsc:ref(?MODULE, "http"),
-            hoconsc:ref(?MODULE, "https")])),
-            #{ desc =>
-"""HTTP(s) listeners are identified by their protocol type and are
-used to serve dashboard UI and restful HTTP API.<br>
-Listeners must have a unique combination of port number and IP address.<br>
-For example, an HTTP listener can listen on all configured IP addresses
-on a given port for a machine by specifying the IP address 0.0.0.0.<br>
-Alternatively, the HTTP listener can specify a unique IP address for each listener,
-but use the same port.
-"""   })}
-    , {default_username, fun default_username/1}
-    , {default_password, fun default_password/1}
-    , {sample_interval, sc(emqx_schema:duration_s(), #{default => "10s"})}
-    , {token_expired_time, sc(emqx_schema:duration(), #{default => "30m"})}
-    , {cors, fun cors/1}
+    [
+        {listeners,
+            ?HOCON(
+                ?R_REF("listeners"),
+                #{desc => ?DESC(listeners)}
+            )},
+        {default_username, fun default_username/1},
+        {default_password, fun default_password/1},
+        {sample_interval,
+            ?HOCON(
+                emqx_schema:duration_s(),
+                #{
+                    default => "10s",
+                    desc => ?DESC(sample_interval),
+                    validator => fun validate_sample_interval/1
+                }
+            )},
+        {token_expired_time,
+            ?HOCON(
+                emqx_schema:duration(),
+                #{
+                    default => "60m",
+                    desc => ?DESC(token_expired_time)
+                }
+            )},
+        {cors, fun cors/1},
+        {i18n_lang, fun i18n_lang/1},
+        {bootstrap_users_file,
+            ?HOCON(binary(), #{desc => ?DESC(bootstrap_users_file), required => false})}
     ];
-
+fields("listeners") ->
+    [
+        {"http",
+            ?HOCON(
+                ?R_REF("http"),
+                #{
+                    desc => "TCP listeners",
+                    required => {false, recursively}
+                }
+            )},
+        {"https",
+            ?HOCON(
+                ?R_REF("https"),
+                #{
+                    desc => "SSL listeners",
+                    required => {false, recursively}
+                }
+            )}
+    ];
 fields("http") ->
-    [ {"protocol", sc(
-        hoconsc:enum([http, https]),
-        #{ desc => "HTTP/HTTPS protocol."
-         , nullable => false
-         , default => http})}
-    , {"bind", fun bind/1}
-    , {"num_acceptors", sc(
-        integer(),
-        #{ default => 4
-         , desc => "Socket acceptor pool for TCP protocols."
-         })}
-    , {"max_connections", sc(integer(), #{default => 512})}
-    , {"backlog", sc(
-        integer(),
-        #{ default => 1024
-         , desc => "Defines the maximum length that the queue of pending connections can grow to."
-        })}
-    , {"send_timeout", sc(emqx_schema:duration(), #{default => "5s"})}
-    , {"inet6", sc(boolean(), #{default => false})}
-    , {"ipv6_v6only", sc(boolean(), #{default => false})}
+    [
+        enable(true),
+        bind(18083)
+        | common_listener_fields()
     ];
-
 fields("https") ->
-    fields("http") ++
-    proplists:delete("fail_if_no_peer_cert",
-                     emqx_schema:server_ssl_opts_schema(#{}, true)).
+    [
+        enable(false),
+        bind(18084)
+        | common_listener_fields() ++
+            exclude_fields(
+                ["fail_if_no_peer_cert"],
+                emqx_schema:server_ssl_opts_schema(#{}, true)
+            )
+    ].
 
-bind(type) -> hoconsc:union([non_neg_integer(), emqx_schema:ip_port()]);
-bind(default) -> 18083;
-bind(nullable) -> false;
-bind(desc) -> "Port without IP(18083) or port with specified IP(127.0.0.1:18083).";
-bind(_) -> undefined.
+exclude_fields([], Fields) ->
+    Fields;
+exclude_fields([FieldName | Rest], Fields) ->
+    %% assert field exists
+    case lists:keytake(FieldName, 1, Fields) of
+        {value, _, New} -> exclude_fields(Rest, New);
+        false -> error({FieldName, Fields})
+    end.
 
-default_username(type) -> string();
+common_listener_fields() ->
+    [
+        {"num_acceptors",
+            ?HOCON(
+                integer(),
+                #{
+                    default => 4,
+                    desc => ?DESC(num_acceptors)
+                }
+            )},
+        {"max_connections",
+            ?HOCON(
+                integer(),
+                #{
+                    default => 512,
+                    desc => ?DESC(max_connections)
+                }
+            )},
+        {"backlog",
+            ?HOCON(
+                integer(),
+                #{
+                    default => 1024,
+                    desc => ?DESC(backlog)
+                }
+            )},
+        {"send_timeout",
+            ?HOCON(
+                emqx_schema:duration(),
+                #{
+                    default => "5s",
+                    desc => ?DESC(send_timeout)
+                }
+            )},
+        {"inet6",
+            ?HOCON(
+                boolean(),
+                #{
+                    default => false,
+                    desc => ?DESC(inet6)
+                }
+            )},
+        {"ipv6_v6only",
+            ?HOCON(
+                boolean(),
+                #{
+                    default => false,
+                    desc => ?DESC(ipv6_v6only)
+                }
+            )}
+    ].
+
+enable(Bool) ->
+    {"enable",
+        ?HOCON(
+            boolean(),
+            #{
+                default => Bool,
+                required => true,
+                desc => ?DESC(listener_enable)
+            }
+        )}.
+
+bind(Port) ->
+    {"bind",
+        ?HOCON(
+            ?UNION([non_neg_integer(), emqx_schema:ip_port()]),
+            #{
+                default => Port,
+                required => true,
+                example => "0.0.0.0:" ++ integer_to_list(Port),
+                desc => ?DESC(bind)
+            }
+        )}.
+
+desc("dashboard") ->
+    ?DESC(desc_dashboard);
+desc("listeners") ->
+    ?DESC(desc_listeners);
+desc("http") ->
+    ?DESC(desc_http);
+desc("https") ->
+    ?DESC(desc_https);
+desc(_) ->
+    undefined.
+
+default_username(type) -> binary();
 default_username(default) -> "admin";
-default_username(nullable) -> false;
+default_username(required) -> true;
+default_username(desc) -> ?DESC(default_username);
+default_username('readOnly') -> true;
 default_username(_) -> undefined.
 
-default_password(type) -> string();
+default_password(type) -> binary();
 default_password(default) -> "public";
-default_password(nullable) -> false;
+default_password(required) -> true;
+default_password('readOnly') -> true;
 default_password(sensitive) -> true;
-default_password(desc) -> """
-The initial default password for dashboard 'admin' user.
-For safety, it should be changed as soon as possible.""";
+default_password(desc) -> ?DESC(default_password);
 default_password(_) -> undefined.
 
 cors(type) -> boolean();
 cors(default) -> false;
-cors(nullable) -> true;
-cors(desc) ->
-"""Support Cross-Origin Resource Sharing (CORS).
-Allows a server to indicate any origins (domain, scheme, or port) other than
-its own from which a browser should permit loading resources.""";
+cors(required) -> false;
+cors(desc) -> ?DESC(cors);
 cors(_) -> undefined.
 
-sc(Type, Meta) -> hoconsc:mk(Type, Meta).
+i18n_lang(type) -> ?ENUM([en, zh]);
+i18n_lang(default) -> en;
+i18n_lang('readOnly') -> true;
+i18n_lang(desc) -> ?DESC(i18n_lang);
+i18n_lang(_) -> undefined.
+
+validate_sample_interval(Second) ->
+    case Second >= 1 andalso Second =< 60 andalso (60 rem Second =:= 0) of
+        true ->
+            ok;
+        false ->
+            Msg = "must be between 1 and 60 and be a divisor of 60.",
+            {error, Msg}
+    end.

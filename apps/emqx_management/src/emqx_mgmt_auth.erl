@@ -20,14 +20,22 @@
 -export([mnesia/1]).
 -boot_mnesia({mnesia, [boot]}).
 
--export([ create/4
-        , read/1
-        , update/4
-        , delete/1
-        , list/0
-        ]).
+-export([
+    create/4,
+    read/1,
+    update/4,
+    delete/1,
+    list/0
+]).
 
--export([ authorize/3 ]).
+-export([authorize/3]).
+
+%% Internal exports (RPC)
+-export([
+    do_update/4,
+    do_delete/1,
+    do_create_app/3
+]).
 
 -define(APP, emqx_app).
 
@@ -39,7 +47,7 @@
     desc = <<>> :: binary() | '_',
     expired_at = 0 :: integer() | undefined | '_',
     created_at = 0 :: integer() | '_'
-              }).
+}).
 
 mnesia(boot) ->
     ok = mria:create_table(?APP, [
@@ -47,7 +55,8 @@ mnesia(boot) ->
         {rlog_shard, ?COMMON_SHARD},
         {storage, disc_copies},
         {record_name, ?APP},
-        {attributes, record_info(fields, ?APP)}]).
+        {attributes, record_info(fields, ?APP)}
+    ]).
 
 create(Name, Enable, ExpiredAt, Desc) ->
     case mnesia:table_info(?APP, size) < 30 of
@@ -56,44 +65,45 @@ create(Name, Enable, ExpiredAt, Desc) ->
     end.
 
 read(Name) ->
-    Fun = fun() ->
-        case mnesia:read(?APP, Name) of
-            [] -> mnesia:abort(not_found);
-            [App] -> to_map(App)
-        end
-          end,
-    trans(Fun).
+    case mnesia:dirty_read(?APP, Name) of
+        [App] -> {ok, to_map(App)};
+        [] -> {error, not_found}
+    end.
 
 update(Name, Enable, ExpiredAt, Desc) ->
-    Fun = fun() ->
-        case mnesia:read(?APP, Name, write) of
-            [] -> mnesia:abort(not_found);
-            [App0 = #?APP{enable = Enable0, desc = Desc0}] ->
-                App =
-                    App0#?APP{
-                        expired_at = ExpiredAt,
-                        enable = ensure_not_undefined(Enable, Enable0),
-                        desc = ensure_not_undefined(Desc, Desc0)
-                    },
-                ok = mnesia:write(App),
-                to_map(App)
-        end
-          end,
-    trans(Fun).
+    trans(fun ?MODULE:do_update/4, [Name, Enable, ExpiredAt, Desc]).
+
+do_update(Name, Enable, ExpiredAt, Desc) ->
+    case mnesia:read(?APP, Name, write) of
+        [] ->
+            mnesia:abort(not_found);
+        [App0 = #?APP{enable = Enable0, desc = Desc0}] ->
+            App =
+                App0#?APP{
+                    expired_at = ExpiredAt,
+                    enable = ensure_not_undefined(Enable, Enable0),
+                    desc = ensure_not_undefined(Desc, Desc0)
+                },
+            ok = mnesia:write(App),
+            to_map(App)
+    end.
 
 delete(Name) ->
-    Fun = fun() ->
-        case mnesia:read(?APP, Name) of
-            [] -> mnesia:abort(not_found);
-            [_App] -> mnesia:delete({?APP, Name}) end
-          end,
-    trans(Fun).
+    trans(fun ?MODULE:do_delete/1, [Name]).
+
+do_delete(Name) ->
+    case mnesia:read(?APP, Name) of
+        [] -> mnesia:abort(not_found);
+        [_App] -> mnesia:delete({?APP, Name})
+    end.
 
 list() ->
     to_map(ets:match_object(?APP, #?APP{_ = '_'})).
 
-authorize(<<"/api/v5/users", _/binary>>, _ApiKey, _ApiSecret) -> {error, <<"not_allowed">>};
-authorize(<<"/api/v5/api_key", _/binary>>, _ApiKey, _ApiSecret) -> {error, <<"not_allowed">>};
+authorize(<<"/api/v5/users", _/binary>>, _ApiKey, _ApiSecret) ->
+    {error, <<"not_allowed">>};
+authorize(<<"/api/v5/api_key", _/binary>>, _ApiKey, _ApiSecret) ->
+    {error, <<"not_allowed">>};
 authorize(_Path, ApiKey, ApiSecret) ->
     Now = erlang:system_time(second),
     case find_by_api_key(ApiKey) of
@@ -102,31 +112,41 @@ authorize(_Path, ApiKey, ApiSecret) ->
                 ok -> ok;
                 error -> {error, "secret_error"}
             end;
-        {ok, true, _ExpiredAt, _SecretHash} -> {error, "secret_expired"};
-        {ok, false, _ExpiredAt, _SecretHash} -> {error, "secret_disable"};
-        {error, Reason} -> {error, Reason}
+        {ok, true, _ExpiredAt, _SecretHash} ->
+            {error, "secret_expired"};
+        {ok, false, _ExpiredAt, _SecretHash} ->
+            {error, "secret_disable"};
+        {error, Reason} ->
+            {error, Reason}
     end.
 
 find_by_api_key(ApiKey) ->
-    Fun = fun() ->  mnesia:match_object(#?APP{api_key = ApiKey, _ = '_'}) end,
-    case trans(Fun) of
-        {ok, [#?APP{api_secret_hash = SecretHash, enable = Enable, expired_at = ExpiredAt}]} ->
+    Fun = fun() -> mnesia:match_object(#?APP{api_key = ApiKey, _ = '_'}) end,
+    case mria:ro_transaction(?COMMON_SHARD, Fun) of
+        {atomic, [#?APP{api_secret_hash = SecretHash, enable = Enable, expired_at = ExpiredAt}]} ->
             {ok, Enable, ExpiredAt, SecretHash};
-        _ -> {error, "not_found"}
+        _ ->
+            {error, "not_found"}
     end.
 
 ensure_not_undefined(undefined, Old) -> Old;
 ensure_not_undefined(New, _Old) -> New.
 
-to_map(Apps)when is_list(Apps) ->
-    Fields = record_info(fields, ?APP),
-    lists:map(fun(Trace0 = #?APP{}) ->
-        [_ | Values] = tuple_to_list(Trace0),
-        maps:remove(api_secret_hash, maps:from_list(lists:zip(Fields, Values)))
-              end, Apps);
-to_map(App0) ->
-    [App] = to_map([App0]),
-    App.
+to_map(Apps) when is_list(Apps) ->
+    [to_map(App) || App <- Apps];
+to_map(#?APP{name = N, api_key = K, enable = E, expired_at = ET, created_at = CT, desc = D}) ->
+    #{
+        name => N,
+        api_key => K,
+        enable => E,
+        expired_at => ET,
+        created_at => CT,
+        desc => D,
+        expired => is_expired(ET)
+    }.
+
+is_expired(undefined) -> false;
+is_expired(ExpiredTime) -> ExpiredTime < erlang:system_time(second).
 
 create_app(Name, Enable, ExpiredAt, Desc) ->
     ApiSecret = generate_api_secret(),
@@ -147,24 +167,28 @@ create_app(Name, Enable, ExpiredAt, Desc) ->
     end.
 
 create_app(App = #?APP{api_key = ApiKey, name = Name}) ->
-    trans(fun() ->
-        case mnesia:read(?APP, Name) of
-            [_] -> mnesia:abort(name_already_existed);
-            [] ->
-                case mnesia:match_object(?APP, #?APP{api_key = ApiKey, _ = '_'}, read) of
-                    [] ->
-                        ok = mnesia:write(App),
-                        to_map(App);
-                    _ -> mnesia:abort(api_key_already_existed)
-                end
-        end
-          end).
+    trans(fun ?MODULE:do_create_app/3, [App, ApiKey, Name]).
 
-trans(Fun) ->
-    case mria:transaction(?COMMON_SHARD, Fun) of
+do_create_app(App, ApiKey, Name) ->
+    case mnesia:read(?APP, Name) of
+        [_] ->
+            mnesia:abort(name_already_existed);
+        [] ->
+            case mnesia:match_object(?APP, #?APP{api_key = ApiKey, _ = '_'}, read) of
+                [] ->
+                    ok = mnesia:write(App),
+                    to_map(App);
+                _ ->
+                    mnesia:abort(api_key_already_existed)
+            end
+    end.
+
+trans(Fun, Args) ->
+    case mria:transaction(?COMMON_SHARD, Fun, Args) of
         {atomic, Res} -> {ok, Res};
         {aborted, Error} -> {error, Error}
     end.
 
 generate_api_secret() ->
-    emqx_guid:to_base62(emqx_guid:gen()).
+    Random = crypto:strong_rand_bytes(32),
+    emqx_base62:encode(Random).

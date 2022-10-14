@@ -19,8 +19,10 @@
 
 -export([start/2, stop/1]).
 
--export([ pre_config_update/3
-        ]).
+-export([
+    pre_config_update/3,
+    post_config_update/5
+]).
 
 -define(TOP_LELVE_HDLR_PATH, (emqx_bridge:config_key_path())).
 -define(LEAF_NODE_HDLR_PATH, (emqx_bridge:config_key_path() ++ ['?', '?'])).
@@ -29,8 +31,8 @@ start(_StartType, _StartArgs) ->
     {ok, Sup} = emqx_bridge_sup:start_link(),
     ok = emqx_bridge:load(),
     ok = emqx_bridge:load_hook(),
-    emqx_config_handler:add_handler(?LEAF_NODE_HDLR_PATH, ?MODULE),
-    emqx_config_handler:add_handler(?TOP_LELVE_HDLR_PATH, emqx_bridge),
+    ok = emqx_config_handler:add_handler(?LEAF_NODE_HDLR_PATH, ?MODULE),
+    ok = emqx_config_handler:add_handler(?TOP_LELVE_HDLR_PATH, emqx_bridge),
     {ok, Sup}.
 
 stop(_State) ->
@@ -39,24 +41,26 @@ stop(_State) ->
     ok = emqx_bridge:unload_hook(),
     ok.
 
--define(IS_OPER(O), when Oper == start; Oper == stop; Oper == restart).
-pre_config_update(_, {Oper, _, _}, undefined) ?IS_OPER(Oper) ->
+%% NOTE: We depends on the `emqx_bridge:pre_config_update/3` to restart/stop the
+%%       underlying resources.
+pre_config_update(_, {_Oper, _, _}, undefined) ->
     {error, bridge_not_found};
-pre_config_update(_, {Oper, Type, Name}, OldConfig) ?IS_OPER(Oper) ->
-    case perform_operation(Oper, Type, Name) of
-        ok ->
-            %% we also need to save the 'enable' to the config files
-            {ok, OldConfig#{<<"enable">> => operation_to_enable(Oper)}};
-        {error, _} = Err -> Err
-    end;
-pre_config_update(_, Conf, _OldConfig) ->
-    {ok, Conf}.
+pre_config_update(_, {Oper, _Type, _Name}, OldConfig) ->
+    %% to save the 'enable' to the config files
+    {ok, OldConfig#{<<"enable">> => operation_to_enable(Oper)}};
+pre_config_update(Path, Conf, _OldConfig) when is_map(Conf) ->
+    case emqx_connector_ssl:convert_certs(filename:join(Path), Conf) of
+        {error, Reason} ->
+            {error, Reason};
+        {ok, ConfNew} ->
+            {ok, ConfNew}
+    end.
+
+post_config_update(Path, '$remove', _, OldConf, _AppEnvs) ->
+    _ = emqx_connector_ssl:clear_certs(filename:join(Path), OldConf);
+post_config_update(_Path, _Req, _, _OldConf, _AppEnvs) ->
+    ok.
 
 %% internal functions
-operation_to_enable(start) -> true;
-operation_to_enable(stop) -> false;
-operation_to_enable(restart) -> true.
-
-perform_operation(start, Type, Name) -> emqx_bridge:restart(Type, Name);
-perform_operation(restart, Type, Name) -> emqx_bridge:restart(Type, Name);
-perform_operation(stop, Type, Name) -> emqx_bridge:stop(Type, Name).
+operation_to_enable(disable) -> false;
+operation_to_enable(enable) -> true.

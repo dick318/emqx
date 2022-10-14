@@ -18,22 +18,27 @@
 
 -include("emqx_authn.hrl").
 -include_lib("emqx/include/logger.hrl").
--include_lib("typerefl/include/types.hrl").
+-include_lib("hocon/include/hoconsc.hrl").
 
 -behaviour(hocon_schema).
 -behaviour(emqx_authentication).
 
--export([ namespace/0
-        , roots/0
-        , fields/1
-        ]).
+-define(PREPARE_KEY, ?MODULE).
 
--export([ refs/0
-        , create/2
-        , update/2
-        , authenticate/2
-        , destroy/1
-        ]).
+-export([
+    namespace/0,
+    roots/0,
+    fields/1,
+    desc/1
+]).
+
+-export([
+    refs/0,
+    create/2,
+    update/2,
+    authenticate/2,
+    destroy/1
+]).
 
 %%------------------------------------------------------------------------------
 %% Hocon Schema
@@ -44,18 +49,27 @@ namespace() -> "authn-mysql".
 roots() -> [?CONF_NS].
 
 fields(?CONF_NS) ->
-    [ {mechanism, emqx_authn_schema:mechanism('password-based')}
-    , {backend, emqx_authn_schema:backend(mysql)}
-    , {password_hash_algorithm, fun emqx_authn_password_hashing:type_ro/1}
-    , {query, fun query/1}
-    , {query_timeout, fun query_timeout/1}
-    ] ++ emqx_authn_schema:common_fields()
-    ++ emqx_connector_mysql:fields(config).
+    [
+        {mechanism, emqx_authn_schema:mechanism(password_based)},
+        {backend, emqx_authn_schema:backend(mysql)},
+        {password_hash_algorithm, fun emqx_authn_password_hashing:type_ro/1},
+        {query, fun query/1},
+        {query_timeout, fun query_timeout/1}
+    ] ++ emqx_authn_schema:common_fields() ++
+        proplists:delete(prepare_statement, emqx_connector_mysql:fields(config)).
+
+desc(?CONF_NS) ->
+    ?DESC(?CONF_NS);
+desc(_) ->
+    undefined.
 
 query(type) -> string();
+query(desc) -> ?DESC(?FUNCTION_NAME);
+query(required) -> true;
 query(_) -> undefined.
 
 query_timeout(type) -> emqx_schema:duration_ms();
+query_timeout(desc) -> ?DESC(?FUNCTION_NAME);
 query_timeout(default) -> "5s";
 query_timeout(_) -> undefined.
 
@@ -64,71 +78,80 @@ query_timeout(_) -> undefined.
 %%------------------------------------------------------------------------------
 
 refs() ->
-   [hoconsc:ref(?MODULE, ?CONF_NS)].
+    [hoconsc:ref(?MODULE, ?CONF_NS)].
 
 create(_AuthenticatorID, Config) ->
     create(Config).
 
-create(#{password_hash_algorithm := Algorithm,
-         query := Query0,
-         query_timeout := QueryTimeout
-        } = Config) ->
-    ok = emqx_authn_password_hashing:init(Algorithm),
-    {Query, PlaceHolders} = emqx_authn_utils:parse_sql(Query0, '?'),
+create(Config0) ->
     ResourceId = emqx_authn_utils:make_resource_id(?MODULE),
-    State = #{password_hash_algorithm => Algorithm,
-              query => Query,
-              placeholders => PlaceHolders,
-              query_timeout => QueryTimeout,
-              resource_id => ResourceId},
-    case emqx_resource:create_local(ResourceId, emqx_connector_mysql, Config) of
-        {ok, already_created} ->
-            {ok, State};
-        {ok, _} ->
-            {ok, State};
+    {Config, State} = parse_config(Config0),
+    {ok, _Data} = emqx_authn_utils:create_resource(ResourceId, emqx_connector_mysql, Config),
+    {ok, State#{resource_id => ResourceId}}.
+
+update(Config0, #{resource_id := ResourceId} = _State) ->
+    {Config, NState} = parse_config(Config0),
+    case emqx_authn_utils:update_resource(emqx_connector_mysql, Config, ResourceId) of
         {error, Reason} ->
-            {error, Reason}
+            error({load_config_error, Reason});
+        {ok, _} ->
+            {ok, NState#{resource_id => ResourceId}}
     end.
 
-update(Config, State) ->
-    case create(Config) of
-        {ok, NewState} ->
-            ok = destroy(State),
-            {ok, NewState};
-        {error, Reason} ->
-            {error, Reason}
-    end.
+destroy(#{resource_id := ResourceId}) ->
+    _ = emqx_resource:remove_local(ResourceId),
+    ok.
 
 authenticate(#{auth_method := _}, _) ->
     ignore;
-authenticate(#{password := Password} = Credential,
-             #{placeholders := PlaceHolders,
-               query := Query,
-               query_timeout := Timeout,
-               resource_id := ResourceId,
-               password_hash_algorithm := Algorithm}) ->
-    Params = emqx_authn_utils:render_sql_params(PlaceHolders, Credential),
-    case emqx_resource:query(ResourceId, {sql, Query, Params, Timeout}) of
-        {ok, _Columns, []} -> ignore;
+authenticate(
+    #{password := Password} = Credential,
+    #{
+        tmpl_token := TmplToken,
+        query_timeout := Timeout,
+        resource_id := ResourceId,
+        password_hash_algorithm := Algorithm
+    }
+) ->
+    Params = emqx_authn_utils:render_sql_params(TmplToken, Credential),
+    case emqx_resource:query(ResourceId, {prepared_query, ?PREPARE_KEY, Params, Timeout}) of
+        {ok, _Columns, []} ->
+            ignore;
         {ok, Columns, [Row | _]} ->
             Selected = maps:from_list(lists:zip(Columns, Row)),
-            case emqx_authn_utils:check_password_from_selected_map(
-                  Algorithm, Selected, Password) of
+            case
+                emqx_authn_utils:check_password_from_selected_map(
+                    Algorithm, Selected, Password
+                )
+            of
                 ok ->
                     {ok, emqx_authn_utils:is_superuser(Selected)};
                 {error, Reason} ->
                     {error, Reason}
             end;
         {error, Reason} ->
-            ?SLOG(error, #{msg => "mysql_query_failed",
-                           resource => ResourceId,
-                           query => Query,
-                           params => Params,
-                           timeout => Timeout,
-                           reason => Reason}),
+            ?TRACE_AUTHN_PROVIDER(error, "mysql_query_failed", #{
+                resource => ResourceId,
+                tmpl_token => TmplToken,
+                params => Params,
+                timeout => Timeout,
+                reason => Reason
+            }),
             ignore
     end.
 
-destroy(#{resource_id := ResourceId}) ->
-    _ = emqx_resource:remove_local(ResourceId),
-    ok.
+parse_config(
+    #{
+        password_hash_algorithm := Algorithm,
+        query := Query0,
+        query_timeout := QueryTimeout
+    } = Config
+) ->
+    ok = emqx_authn_password_hashing:init(Algorithm),
+    {PrepareSql, TmplToken} = emqx_authn_utils:parse_sql(Query0, '?'),
+    State = #{
+        password_hash_algorithm => Algorithm,
+        tmpl_token => TmplToken,
+        query_timeout => QueryTimeout
+    },
+    {Config#{prepare_statement => #{?PREPARE_KEY => PrepareSql}}, State}.

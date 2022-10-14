@@ -18,12 +18,13 @@
 
 -behaviour(hocon_schema).
 
--export([ roots/0
-        , fields/1
-        , namespace/0
-        ]).
+-export([
+    roots/0,
+    fields/1,
+    namespace/0
+]).
 
--include_lib("typerefl/include/types.hrl").
+-include_lib("hocon/include/hoconsc.hrl").
 -include("emqx_plugins.hrl").
 
 namespace() -> "plugin".
@@ -31,59 +32,57 @@ namespace() -> "plugin".
 roots() -> [?CONF_ROOT].
 
 fields(?CONF_ROOT) ->
-    #{fields => root_fields(),
-      desc => """
-Manage EMQ X plugins.
-<br>
-Plugins can be pre-built as a part of EMQ X package,
-or installed as a standalone package in a location specified by
-<code>install_dir</code> config key
-<br>
-The standalone-installed plugins are referred to as 'external' plugins.
-"""
-     };
+    #{
+        fields => root_fields(),
+        desc => ?DESC(?CONF_ROOT)
+    };
 fields(state) ->
-    #{ fields => state_fields(),
-       desc => "A per-plugin config to describe the desired state of the plugin."
-     }.
+    #{
+        fields => state_fields(),
+        desc => ?DESC(state)
+    }.
 
 state_fields() ->
-    [ {name_vsn,
-       hoconsc:mk(string(),
-                  #{ desc => "The {name}-{version} of the plugin.<br>"
-                             "It should match the plugin application name-version as the "
-                             "for the plugin release package name<br>"
-                             "For example: my_plugin-0.1.0."
-                   , nullable => false
-                   })}
-    , {enable,
-       hoconsc:mk(boolean(),
-                  #{ desc => "Set to 'true' to enable this plugin"
-                   , nullable => false
-                   })}
+    [
+        {name_vsn,
+            ?HOCON(
+                string(),
+                #{
+                    desc => ?DESC(name_vsn),
+                    required => true
+                }
+            )},
+        {enable,
+            ?HOCON(
+                boolean(),
+                #{
+                    desc => ?DESC(enable),
+                    required => true
+                }
+            )}
     ].
 
 root_fields() ->
-    [ {states, fun states/1}
-    , {install_dir, fun install_dir/1}
+    [
+        {states, fun states/1},
+        {install_dir, fun install_dir/1},
+        {check_interval, fun check_interval/1}
     ].
 
-states(type) -> hoconsc:array(hoconsc:ref(state));
-states(nullable) -> true;
+states(type) -> ?ARRAY(?R_REF(state));
+states(required) -> false;
 states(default) -> [];
-states(desc) -> "An array of plugins in the desired states.<br>"
-                "The plugins are started in the defined order";
+states(desc) -> ?DESC(states);
 states(_) -> undefined.
 
 install_dir(type) -> string();
-install_dir(nullable) -> true;
-install_dir(default) -> "plugins"; %% runner's root dir
+install_dir(required) -> false;
+%% runner's root dir
+install_dir(default) -> "plugins";
 install_dir(T) when T =/= desc -> undefined;
-install_dir(desc) -> """
-In which directory are the external plugins installed.
-The plugin beam files and configuration files should reside in
-the sub-directory named as <code>emqx_foo_bar-0.1.0</code>.
-<br>
-NOTE: For security reasons, this directory should **NOT** be writable
-by anyone expect for <code>emqx</code> (or any user which runs EMQ X)
-""".
+install_dir(desc) -> ?DESC(install_dir).
+
+check_interval(type) -> emqx_schema:duration();
+check_interval(default) -> "5s";
+check_interval(T) when T =/= desc -> undefined;
+check_interval(desc) -> ?DESC(check_interval).

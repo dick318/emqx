@@ -18,106 +18,128 @@
 
 -behaviour(minirest_api).
 
--include_lib("emqx/include/emqx.hrl").
+-include("emqx_retainer.hrl").
+-include_lib("hocon/include/hoconsc.hrl").
 
--export([api_spec/0]).
+%% API
+-export([api_spec/0, paths/0, schema/1, namespace/0, fields/1]).
 
--export([ lookup_retained_warp/2
-        , with_topic_warp/2
-        , config/2]).
+-export([
+    lookup_retained_warp/2,
+    with_topic_warp/2,
+    config/2
+]).
 
--import(emqx_mgmt_api_configs, [gen_schema/1]).
--import(emqx_mgmt_util, [ object_array_schema/2
-                        , object_schema/2
-                        , schema/1
-                        , schema/2
-                        , error_schema/2
-                        , page_params/0
-                        , properties/1]).
+-import(hoconsc, [mk/1, mk/2, ref/1, ref/2, array/1]).
+-import(emqx_dashboard_swagger, [error_codes/2]).
 
--define(MAX_PAYLOAD_SIZE, 1048576). %% 1MB = 1024 x 1024
+%% 1MB = 1024 x 1024
+-define(MAX_PAYLOAD_SIZE, 1048576).
+-define(PREFIX, "/mqtt/retainer").
+-define(TAGS, [<<"retainer">>]).
+
+namespace() -> "retainer".
 
 api_spec() ->
-    {[lookup_retained_api(), with_topic_api(), config_api()], []}.
+    emqx_dashboard_swagger:spec(?MODULE, #{check_schema => true}).
 
-conf_schema() ->
-    gen_schema(emqx:get_raw_config([retainer])).
+paths() ->
+    [?PREFIX, ?PREFIX ++ "/messages", ?PREFIX ++ "/message/:topic"].
 
-message_props() ->
-    properties([
-        {id, string, <<"Message ID">>},
-        {topic, string, <<"MQTT Topic">>},
-        {qos, integer, <<"MQTT QoS">>, [0, 1, 2]},
-        {payload, string, <<"MQTT Payload">>},
-        {publish_at, string, <<"Publish datetime, in RFC 3339 format">>},
-        {from_clientid, string, <<"Publisher ClientId">>},
-        {from_username, string, <<"Publisher Username">>}
-    ]).
-
-parameters() ->
-    [#{
-        name => topic,
-        in => path,
-        required => true,
-        schema => #{type => "string"}
-    }].
-
-lookup_retained_api() ->
-    Metadata = #{
+schema(?PREFIX) ->
+    #{
+        'operationId' => config,
         get => #{
-            description => <<"List retained messages">>,
-            parameters => page_params(),
+            tags => ?TAGS,
+            description => ?DESC(get_config_api),
             responses => #{
-                <<"200">> => object_array_schema(
-                    maps:without([payload], message_props()),
-                    <<"List retained messages">>),
-                <<"405">> => schema(<<"NotAllowed">>)
-            }
-        }
-    },
-    {"/mqtt/retainer/messages", Metadata, lookup_retained_warp}.
-
-with_topic_api() ->
-    MetaData = #{
-        get => #{
-            description => <<"lookup matching messages">>,
-            parameters => parameters(),
-            responses => #{
-                <<"200">> => object_schema(message_props(), <<"List retained messages">>),
-                <<"404">> => error_schema(<<"Retained Not Exists">>, ['NOT_FOUND']),
-                <<"405">> => schema(<<"NotAllowed">>)
-            }
-        },
-        delete => #{
-            description => <<"delete matching messages">>,
-            parameters => parameters(),
-            responses => #{
-                <<"204">> => schema(<<"Succeeded">>),
-                <<"405">> => schema(<<"NotAllowed">>)
-            }
-        }
-    },
-    {"/mqtt/retainer/message/:topic", MetaData, with_topic_warp}.
-
-config_api() ->
-    MetaData = #{
-        get => #{
-            description => <<"get retainer config">>,
-            responses => #{
-                <<"200">> => schema(conf_schema(), <<"Get configs successfully">>),
-                <<"404">> => error_schema(<<"Config not found">>, ['NOT_FOUND'])
+                200 => mk(conf_schema(), #{desc => ?DESC(config_content)}),
+                404 => error_codes(['NOT_FOUND'], ?DESC(config_not_found))
             }
         },
         put => #{
-            description => <<"Update retainer config">>,
-            'requestBody' => schema(conf_schema()),
+            tags => ?TAGS,
+            description => ?DESC(update_retainer_api),
+            'requestBody' => mk(conf_schema(), #{desc => ?DESC(config_content)}),
             responses => #{
-                <<"200">> => schema(conf_schema(), <<"Update configs successfully">>),
-                <<"400">> => error_schema(<<"Update configs failed">>, ['UPDATE_FAILED'])
+                200 => mk(conf_schema(), #{desc => ?DESC(update_config_success)}),
+                400 => error_codes(['UPDATE_FAILED'], ?DESC(update_config_failed))
             }
         }
-    },
-    {"/mqtt/retainer", MetaData, config}.
+    };
+schema(?PREFIX ++ "/messages") ->
+    #{
+        'operationId' => lookup_retained_warp,
+        get => #{
+            tags => ?TAGS,
+            description => ?DESC(list_retained_api),
+            parameters => page_params(),
+            responses => #{
+                200 => [
+                    {data, mk(array(ref(message_summary)), #{desc => ?DESC(retained_list)})},
+                    {meta, mk(hoconsc:ref(emqx_dashboard_swagger, meta))}
+                ],
+                400 => error_codes(['BAD_REQUEST'], ?DESC(unsupported_backend))
+            }
+        }
+    };
+schema(?PREFIX ++ "/message/:topic") ->
+    #{
+        'operationId' => with_topic_warp,
+        get => #{
+            tags => ?TAGS,
+            description => ?DESC(lookup_api),
+            parameters => parameters(),
+            responses => #{
+                200 => mk(ref(message), #{desc => ?DESC(message_detail)}),
+                404 => error_codes(['NOT_FOUND'], ?DESC(message_not_exist)),
+                400 => error_codes(['BAD_REQUEST'], ?DESC(unsupported_backend))
+            }
+        },
+        delete => #{
+            tags => ?TAGS,
+            description => ?DESC(delete_matching_api),
+            parameters => parameters(),
+            responses => #{
+                204 => <<>>,
+                400 => error_codes(
+                    ['BAD_REQUEST'],
+                    ?DESC(unsupported_backend)
+                )
+            }
+        }
+    }.
+
+page_params() ->
+    emqx_dashboard_swagger:fields(page) ++ emqx_dashboard_swagger:fields(limit).
+
+conf_schema() ->
+    ref(emqx_retainer_schema, "retainer").
+
+parameters() ->
+    [
+        {topic,
+            mk(binary(), #{
+                in => path,
+                required => true,
+                desc => ?DESC(topic)
+            })}
+    ].
+
+fields(message_summary) ->
+    [
+        {msgid, mk(binary(), #{desc => ?DESC(msgid)})},
+        {topic, mk(binary(), #{desc => ?DESC(topic)})},
+        {qos, mk(emqx_schema:qos(), #{desc => ?DESC(qos)})},
+        {publish_at, mk(string(), #{desc => ?DESC(publish_at)})},
+        {from_clientid, mk(binary(), #{desc => ?DESC(from_clientid)})},
+        {from_username, mk(binary(), #{desc => ?DESC(from_username)})}
+    ];
+fields(message) ->
+    [
+        {payload, mk(binary(), #{desc => ?DESC(payload)})}
+        | fields(message_summary)
+    ].
 
 lookup_retained_warp(Type, Params) ->
     check_backend(Type, Params, fun lookup_retained/2).
@@ -127,25 +149,29 @@ with_topic_warp(Type, Params) ->
 
 config(get, _) ->
     {200, emqx:get_raw_config([retainer])};
-
 config(put, #{body := Body}) ->
     try
         {ok, _} = emqx_retainer:update_config(Body),
         {200, emqx:get_raw_config([retainer])}
-    catch _:Reason:_ ->
-            {400,
-             #{code => 'UPDATE_FAILED',
-               message => iolist_to_binary(io_lib:format("~p~n", [Reason]))}}
+    catch
+        _:Reason:_ ->
+            {400, #{
+                code => <<"UPDATE_FAILED">>,
+                message => iolist_to_binary(io_lib:format("~p~n", [Reason]))
+            }}
     end.
 
 %%------------------------------------------------------------------------------
 %% Interval Funcs
 %%------------------------------------------------------------------------------
 lookup_retained(get, #{query_string := Qs}) ->
-    Page = maps:get(page, Qs, 1),
-    Limit = maps:get(page, Qs, emqx_mgmt:max_row_limit()),
+    Page = maps:get(<<"page">>, Qs, 1),
+    Limit = maps:get(<<"limit">>, Qs, emqx_mgmt:max_row_limit()),
     {ok, Msgs} = emqx_retainer_mnesia:page_read(undefined, undefined, Page, Limit),
-    {200, [format_message(Msg) || Msg <- Msgs]}.
+    {200, #{
+        data => [format_message(Msg) || Msg <- Msgs],
+        meta => #{page => Page, limit => Limit, count => emqx_retainer_mnesia:size(?TAB_MESSAGE)}
+    }}.
 
 with_topic(get, #{bindings := Bindings}) ->
     Topic = maps:get(topic, Bindings),
@@ -154,24 +180,36 @@ with_topic(get, #{bindings := Bindings}) ->
         [H | _] ->
             {200, format_detail_message(H)};
         _ ->
-            {404, #{code => 'NOT_FOUND'}}
+            {404, #{
+                code => <<"NOT_FOUND">>,
+                message => <<"Viewed message doesn't exist">>
+            }}
     end;
-
 with_topic(delete, #{bindings := Bindings}) ->
     Topic = maps:get(topic, Bindings),
     emqx_retainer_mnesia:delete_message(undefined, Topic),
     {204}.
 
-format_message(#message{ id = ID, qos = Qos, topic = Topic, from = From
-                       , timestamp = Timestamp, headers = Headers}) ->
-    #{msgid => emqx_guid:to_hexstr(ID),
-      qos => Qos,
-      topic => Topic,
-      publish_at => list_to_binary(calendar:system_time_to_rfc3339(
-                                     Timestamp, [{unit, millisecond}])),
-      from_clientid => to_bin_string(From),
-      from_username => maps:get(username, Headers, <<>>)
-     }.
+format_message(#message{
+    id = ID,
+    qos = Qos,
+    topic = Topic,
+    from = From,
+    timestamp = Timestamp,
+    headers = Headers
+}) ->
+    #{
+        msgid => emqx_guid:to_hexstr(ID),
+        qos => Qos,
+        topic => Topic,
+        publish_at => list_to_binary(
+            calendar:system_time_to_rfc3339(
+                Timestamp, [{unit, millisecond}]
+            )
+        ),
+        from_clientid => to_bin_string(From),
+        from_username => maps:get(username, Headers, <<>>)
+    }.
 
 format_detail_message(#message{payload = Payload} = Msg) ->
     Base = format_message(Msg),
@@ -184,15 +222,13 @@ format_detail_message(#message{payload = Payload} = Msg) ->
 
 to_bin_string(Data) when is_binary(Data) ->
     Data;
-to_bin_string(Data)  ->
+to_bin_string(Data) ->
     list_to_binary(io_lib:format("~p", [Data])).
 
 check_backend(Type, Params, Cont) ->
-    case emqx:get_config([retainer, config, type]) of
+    case emqx:get_config([retainer, backend, type]) of
         built_in_database ->
             Cont(Type, Params);
         _ ->
-            {405,
-             #{<<"content-type">> => <<"text/plain">>},
-             <<"This API only for built in database">>}
+            {400, 'BAD_REQUEST', <<"This API only support built in database">>}
     end.

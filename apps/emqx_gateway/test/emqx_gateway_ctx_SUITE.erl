@@ -29,14 +29,20 @@ all() -> emqx_common_test_helpers:all(?MODULE).
 
 init_per_suite(Conf) ->
     ok = meck:new(emqx_access_control, [passthrough, no_history, no_link]),
-    ok = meck:expect(emqx_access_control, authenticate,
-                     fun(#{clientid := bad_client}) ->
-                             {error, bad_username_or_password};
-                        (ClientInfo) -> {ok, ClientInfo}
-                     end),
+    ok = meck:expect(
+        emqx_access_control,
+        authenticate,
+        fun
+            (#{clientid := bad_client}) ->
+                {error, bad_username_or_password};
+            (ClientInfo) ->
+                {ok, ClientInfo}
+        end
+    ),
     Conf.
 
 end_per_suite(_Conf) ->
+    meck:unload(emqx_access_control),
     ok.
 
 %%--------------------------------------------------------------------
@@ -44,24 +50,27 @@ end_per_suite(_Conf) ->
 %%--------------------------------------------------------------------
 
 t_authenticate(_) ->
-    Ctx = #{gwname => mqttsn, auth => [], cm => self()},
-    Info1 = #{ mountpoint => undefined
-             , clientid => <<"user1">>
-             },
+    Ctx = #{gwname => mqttsn, cm => self()},
+    Info1 = #{
+        mountpoint => undefined,
+        clientid => <<"user1">>
+    },
     NInfo1 = zone(Info1),
     ?assertEqual({ok, NInfo1}, emqx_gateway_ctx:authenticate(Ctx, Info1)),
 
-    Info2 = #{ mountpoint => <<"mqttsn/${clientid}/">> 
-             , clientid => <<"user1">>
-             },
+    Info2 = #{
+        mountpoint => <<"mqttsn/${clientid}/">>,
+        clientid => <<"user1">>
+    },
     NInfo2 = zone(Info2#{mountpoint => <<"mqttsn/user1/">>}),
     ?assertEqual({ok, NInfo2}, emqx_gateway_ctx:authenticate(Ctx, Info2)),
 
-    Info3 = #{ mountpoint => <<"mqttsn/${clientid}/">> 
-             , clientid => bad_client
-             },
-    {error, bad_username_or_password}
-        = emqx_gateway_ctx:authenticate(Ctx, Info3),
+    Info3 = #{
+        mountpoint => <<"mqttsn/${clientid}/">>,
+        clientid => bad_client
+    },
+    {error, bad_username_or_password} =
+        emqx_gateway_ctx:authenticate(Ctx, Info3),
     ok.
 
 zone(Info) -> Info#{zone => default}.

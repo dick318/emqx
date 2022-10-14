@@ -17,122 +17,246 @@
 
 -behaviour(minirest_api).
 
--import(emqx_mgmt_util, [ schema/2
-                        , object_schema/2
-                        , object_array_schema/2
-                        , error_schema/2
-                        , properties/1
-                        ]).
-
--export([api_spec/0]).
-
--export([ nodes/2
-        , node/2
-        , node_metrics/2
-        , node_stats/2]).
-
 -include_lib("emqx/include/emqx.hrl").
+-include_lib("typerefl/include/types.hrl").
+
+-import(hoconsc, [mk/2, ref/1, ref/2, enum/1, array/1]).
+
+-define(NODE_METRICS_MODULE, emqx_mgmt_api_metrics).
+-define(NODE_STATS_MODULE, emqx_mgmt_api_stats).
+
+-define(SOURCE_ERROR, 'SOURCE_ERROR').
+
+%% Swagger specs from hocon schema
+-export([
+    api_spec/0,
+    schema/1,
+    paths/0,
+    fields/1
+]).
+
+%% API callbacks
+-export([
+    nodes/2,
+    node/2,
+    node_metrics/2,
+    node_stats/2
+]).
+
+%%--------------------------------------------------------------------
+%% API spec funcs
+%%--------------------------------------------------------------------
 
 api_spec() ->
-    {apis(), []}.
+    emqx_dashboard_swagger:spec(?MODULE, #{check_schema => true}).
 
-apis() ->
-    [ nodes_api()
-    , node_api()
-    , node_metrics_api()
-    , node_stats_api()].
+paths() ->
+    [
+        "/nodes",
+        "/nodes/:node",
+        "/nodes/:node/metrics",
+        "/nodes/:node/stats"
+    ].
 
-properties() ->
-    properties([
-        {node, string, <<"Node name">>},
-        {connections, integer, <<"Number of clients currently connected to this node">>},
-        {load1, string, <<"CPU average load in 1 minute">>},
-        {load5, string, <<"CPU average load in 5 minute">>},
-        {load15, string, <<"CPU average load in 15 minute">>},
-        {max_fds, integer, <<"Maximum file descriptor limit for the operating system">>},
-        {memory_total, string, <<"VM allocated system memory">>},
-        {memory_used, string, <<"VM occupied system memory">>},
-        {node_status, string, <<"Node status">>},
-        {otp_release, string, <<"Erlang/OTP version used by EMQ X Broker">>},
-        {process_available, integer, <<"Number of available processes">>},
-        {process_used, integer, <<"Number of used processes">>},
-        {uptime, integer, <<"EMQ X Broker runtime, millisecond">>},
-        {version, string, <<"EMQ X Broker version">>},
-        {sys_path, string, <<"EMQ X system file location">>},
-        {log_path, string, <<"EMQ X log file location">>},
-        {config_path, string, <<"EMQ X config file location">>},
-        {role, string, <<"Node role">>}
-    ]).
-
-parameters() ->
-    [#{
-        name => node_name,
-        in => path,
-        description => <<"node name">>,
-        schema => #{type => string},
-        required => true,
-        example => node()
-    }].
-nodes_api() ->
-    Metadata = #{
-        get => #{
-            description => <<"List EMQ X nodes">>,
-            responses => #{
-                <<"200">> => object_array_schema(properties(), <<"List EMQ X Nodes">>)
+schema("/nodes") ->
+    #{
+        'operationId' => nodes,
+        get =>
+            #{
+                description => <<"List EMQX nodes">>,
+                tags => [<<"Nodes">>],
+                responses =>
+                    #{
+                        200 => mk(
+                            array(ref(node_info)),
+                            #{desc => <<"List all EMQX nodes">>}
+                        )
+                    }
             }
-        }
-    },
-    {"/nodes", Metadata, nodes}.
+    };
+schema("/nodes/:node") ->
+    #{
+        'operationId' => node,
+        get =>
+            #{
+                description => <<"Get node info">>,
+                tags => [<<"Nodes">>],
+                parameters => [ref(node_name)],
+                responses =>
+                    #{
+                        200 => mk(
+                            ref(node_info),
+                            #{desc => <<"Get node info successfully">>}
+                        ),
+                        400 => node_error()
+                    }
+            }
+    };
+schema("/nodes/:node/metrics") ->
+    #{
+        'operationId' => node_metrics,
+        get =>
+            #{
+                description => <<"Get node metrics">>,
+                tags => [<<"Nodes">>],
+                parameters => [ref(node_name)],
+                responses =>
+                    #{
+                        200 => mk(
+                            ref(?NODE_METRICS_MODULE, node_metrics),
+                            #{desc => <<"Get node metrics successfully">>}
+                        ),
+                        400 => node_error()
+                    }
+            }
+    };
+schema("/nodes/:node/stats") ->
+    #{
+        'operationId' => node_stats,
+        get =>
+            #{
+                description => <<"Get node stats">>,
+                tags => [<<"Nodes">>],
+                parameters => [ref(node_name)],
+                responses =>
+                    #{
+                        200 => mk(
+                            ref(?NODE_STATS_MODULE, node_stats_data),
+                            #{desc => <<"Get node stats successfully">>}
+                        ),
+                        400 => node_error()
+                    }
+            }
+    }.
 
-node_api() ->
-    Metadata = #{
-        get => #{
-            description => <<"Get node info">>,
-            parameters => parameters(),
-            responses => #{
-                <<"400">> => error_schema(<<"Node error">>, ['SOURCE_ERROR']),
-                <<"200">> => object_schema(properties(), <<"Get EMQ X Nodes info by name">>)}}},
-    {"/nodes/:node_name", Metadata, node}.
+%%--------------------------------------------------------------------
+%% Fields
 
-node_metrics_api() ->
-    Metadata = #{
-        get => #{
-            description => <<"Get node metrics">>,
-            parameters => parameters(),
-            responses => #{
-                <<"400">> => error_schema(<<"Node error">>, ['SOURCE_ERROR']),
-                %% TODO: Node Metrics Schema
-                <<"200">> => schema(metrics, <<"Get EMQ X Node Metrics">>)}}},
-    {"/nodes/:node_name/metrics", Metadata, node_metrics}.
+fields(node_name) ->
+    [
+        {node,
+            mk(
+                atom(),
+                #{
+                    in => path,
+                    description => <<"Node name">>,
+                    required => true,
+                    example => <<"emqx@127.0.0.1">>
+                }
+            )}
+    ];
+fields(node_info) ->
+    [
+        {node,
+            mk(
+                atom(),
+                #{desc => <<"Node name">>, example => <<"emqx@127.0.0.1">>}
+            )},
+        {connections,
+            mk(
+                non_neg_integer(),
+                #{desc => <<"Number of clients currently connected to this node">>, example => 0}
+            )},
+        {load1,
+            mk(
+                string(),
+                #{desc => <<"CPU average load in 1 minute">>, example => "2.66"}
+            )},
+        {load5,
+            mk(
+                string(),
+                #{desc => <<"CPU average load in 5 minute">>, example => "2.66"}
+            )},
+        {load15,
+            mk(
+                string(),
+                #{desc => <<"CPU average load in 15 minute">>, example => "2.66"}
+            )},
+        {max_fds,
+            mk(
+                non_neg_integer(),
+                #{desc => <<"File descriptors limit">>, example => 1024}
+            )},
+        {memory_total,
+            mk(
+                emqx_schema:bytesize(),
+                #{desc => <<"Allocated memory">>, example => "512.00M"}
+            )},
+        {memory_used,
+            mk(
+                emqx_schema:bytesize(),
+                #{desc => <<"Used memory">>, example => "256.00M"}
+            )},
+        {node_status,
+            mk(
+                enum(['running', 'stopped']),
+                #{desc => <<"Node status">>, example => "running"}
+            )},
+        {otp_release,
+            mk(
+                string(),
+                #{desc => <<"Erlang/OTP version">>, example => "24.2/12.2"}
+            )},
+        {process_available,
+            mk(
+                non_neg_integer(),
+                #{desc => <<"Erlang processes limit">>, example => 2097152}
+            )},
+        {process_used,
+            mk(
+                non_neg_integer(),
+                #{desc => <<"Running Erlang processes">>, example => 1024}
+            )},
+        {uptime,
+            mk(
+                non_neg_integer(),
+                #{desc => <<"System uptime, milliseconds">>, example => 5120000}
+            )},
+        {version,
+            mk(
+                string(),
+                #{desc => <<"Release version">>, example => "5.0.0-beat.3-00000000"}
+            )},
+        {sys_path,
+            mk(
+                string(),
+                #{desc => <<"Path to system files">>, example => "path/to/emqx"}
+            )},
+        {log_path,
+            mk(
+                string(),
+                #{
+                    desc => <<"Path to log files">>,
+                    example => "path/to/log | The log path is not yet set"
+                }
+            )},
+        {role,
+            mk(
+                enum([core, replicant]),
+                #{desc => <<"Node role">>, example => "core"}
+            )}
+    ].
 
-node_stats_api() ->
-    Metadata = #{
-        get => #{
-            description => <<"Get node stats">>,
-            parameters => parameters(),
-            responses => #{
-                <<"400">> => error_schema(<<"Node error">>, ['SOURCE_ERROR']),
-                %% TODO: Node Stats Schema
-                <<"200">> => schema(stat, <<"Get EMQ X Node Stats">>)}}},
-    {"/nodes/:node_name/stats", Metadata, node_stats}.
+%%--------------------------------------------------------------------
+%% API Handler funcs
+%%--------------------------------------------------------------------
 
-%%%==============================================================================================
-%% parameters trans
 nodes(get, _Params) ->
-    list(#{}).
+    list_nodes(#{}).
 
-node(get, #{bindings := #{node_name := NodeName}}) ->
-    get_node(binary_to_atom(NodeName, utf8)).
+node(get, #{bindings := #{node := NodeName}}) ->
+    get_node(NodeName).
 
-node_metrics(get, #{bindings := #{node_name := NodeName}}) ->
-    get_metrics(binary_to_atom(NodeName, utf8)).
+node_metrics(get, #{bindings := #{node := NodeName}}) ->
+    get_metrics(NodeName).
 
-node_stats(get, #{bindings := #{node_name := NodeName}}) ->
-    get_stats(binary_to_atom(NodeName, utf8)).
+node_stats(get, #{bindings := #{node := NodeName}}) ->
+    get_stats(NodeName).
 
-%%%==============================================================================================
+%%--------------------------------------------------------------------
 %% api apply
-list(#{}) ->
+
+list_nodes(#{}) ->
     NodesInfo = [format(Node, NodeInfo) || {Node, NodeInfo} <- emqx_mgmt:list_nodes()],
     {200, NodesInfo}.
 
@@ -160,34 +284,35 @@ get_stats(Node) ->
             {200, Stats}
     end.
 
-%%============================================================================================================
+%%--------------------------------------------------------------------
 %% internal function
 
 format(_Node, Info = #{memory_total := Total, memory_used := Used}) ->
-    {ok, SysPathBinary} = file:get_cwd(),
-    SysPath = list_to_binary(SysPathBinary),
-    ConfigPath = <<SysPath/binary, "/etc/emqx.conf">>,
-    LogPath = case log_path() of
-                  undefined ->
-                      <<"not found">>;
-                  Path0 ->
-                      Path = list_to_binary(Path0),
-                      <<SysPath/binary, Path/binary>>
-              end,
-    Info#{ memory_total := emqx_mgmt_util:kmg(Total)
-         , memory_used := emqx_mgmt_util:kmg(Used)
-         , sys_path => SysPath
-         , config_path => ConfigPath
-         , log_path => LogPath}.
+    RootDir = list_to_binary(code:root_dir()),
+    LogPath =
+        case log_path() of
+            undefined ->
+                <<"log.file_handler.default.enable is false,only log to console">>;
+            Path ->
+                filename:join(RootDir, Path)
+        end,
+    Info#{
+        memory_total := emqx_mgmt_util:kmg(Total),
+        memory_used := emqx_mgmt_util:kmg(Used),
+        sys_path => RootDir,
+        log_path => LogPath
+    }.
 
 log_path() ->
     Configs = logger:get_handler_config(),
     get_log_path(Configs).
 
-get_log_path([#{id := file} = LoggerConfig | _LoggerConfigs]) ->
-    Config = maps:get(config, LoggerConfig),
-    maps:get(file, Config);
+get_log_path([#{config := #{file := Path}} | _LoggerConfigs]) ->
+    filename:dirname(Path);
 get_log_path([_LoggerConfig | LoggerConfigs]) ->
     get_log_path(LoggerConfigs);
 get_log_path([]) ->
     undefined.
+
+node_error() ->
+    emqx_dashboard_swagger:error_codes([?SOURCE_ERROR], <<"Node error">>).

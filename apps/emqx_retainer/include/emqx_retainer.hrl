@@ -17,15 +17,19 @@
 -include_lib("emqx/include/emqx.hrl").
 
 -define(APP, emqx_retainer).
--define(TAB, ?APP).
+-define(TAB_MESSAGE, emqx_retainer_message).
+-define(TAB_INDEX, emqx_retainer_index).
+-define(TAB_INDEX_META, emqx_retainer_index_meta).
 -define(RETAINER_SHARD, emqx_retainer_shard).
 
 -type topic() :: binary().
 -type payload() :: binary().
 -type message() :: #message{}.
 
--type context() :: #{context_id := pos_integer(),
-                     atom() => term()}.
+-type context() :: #{
+    context_id := pos_integer(),
+    atom() => term()
+}.
 
 -define(DELIVER_SEMAPHORE, deliver_remained_quota).
 -type semaphore() :: ?DELIVER_SEMAPHORE.

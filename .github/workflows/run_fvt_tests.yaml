@@ -16,7 +16,7 @@ jobs:
   prepare:
     runs-on: ubuntu-20.04
     # prepare source with any OTP version, no need for a matrix
-    container: ghcr.io/emqx/emqx-builder/5.0-5:1.13.2-24.1.5-4-alpine3.14
+    container: ghcr.io/emqx/emqx-builder/5.0-17:1.13.4-24.2.1-1-alpine3.15.1
 
     steps:
       - uses: actions/checkout@v2
@@ -41,24 +41,23 @@ jobs:
       matrix:
         profile:
           - emqx
-          - emqx-edge
           - emqx-enterprise
           - emqx-elixir
         cluster_db_backend:
           - mnesia
           - rlog
         os:
-          - alpine3.14
+          - ["alpine3.15.1", "alpine:3.15.1"]
         otp:
-          - 24.1.5-4
+          - 24.2.1-1
         elixir:
-          - 1.13.2
+          - 1.13.4
         arch:
           - amd64
-        exclude:
-          - profile: emqx-edge
-            cluster_db_backend: rlog
     steps:
+    - uses: erlef/setup-beam@v1
+      with:
+        otp-version: "24.2"
     - uses: actions/download-artifact@v2
       with:
         name: source
@@ -66,32 +65,11 @@ jobs:
     - name: unzip source code
       run: unzip -q source.zip
 
-    - name: Get deps git refs for cache
-      id: deps-refs
-      run: |
-        cd source
-        make ensure-rebar3
-        sudo cp rebar3 /usr/local/bin/rebar3
-        scripts/get-dep-refs.sh
-    - name: load rocksdb cache
-      uses: actions/cache@v2
-      with:
-        path: |
-          source/_build/default/lib/rocksdb/
-          source/deps/rocksdb/
-        key: ${{ matrix.os }}-${{ matrix.elixir }}-${{ matrix.otp }}-${{ matrix.arch }}-${{ steps.deps-refs.outputs.DEP_ROCKSDB_REF }}
-    - name: load quicer cache
-      uses: actions/cache@v2
-      with:
-        path: |
-          source/_build/default/lib/quicer/
-          source/deps/quicer/
-        key: ${{ matrix.os }}-${{ matrix.elixir }}-${{ matrix.otp }}-${{ matrix.arch }}-${{ steps.deps-refs.outputs.DEP_QUICER_REF }}
-
     - name: make docker image
       working-directory: source
       env:
-        EMQX_BUILDER: ghcr.io/emqx/emqx-builder/5.0-5:${{ matrix.elixir }}-${{ matrix.otp }}-${{ matrix.os }}
+        EMQX_BUILDER: ghcr.io/emqx/emqx-builder/5.0-17:${{ matrix.elixir }}-${{ matrix.otp }}-${{ matrix.os[0] }}
+        EMQX_RUNNER: ${{ matrix.os[1] }}
       run: |
         make ${{ matrix.profile }}-docker
     - name: run emqx
@@ -121,6 +99,10 @@ jobs:
           echo "DUMP_CONTAINER_LOGS_END"
           exit 1
         fi
+    # simple smoke test for node_dump
+    - name: test node_dump
+      run: |
+        docker exec node1.emqx.io node_dump
 
   helm_test:
     runs-on: ubuntu-20.04
@@ -129,19 +111,26 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        discovery:
+        - k8s
+        - dns
         profile:
         - emqx
+        - emqx-enterprise
         os:
-          - alpine3.14
+        - ["debian11", "debian:11-slim"]
         otp:
-          - 24.1.5-4
+        - 24.2.1-1
         elixir:
-          - 1.13.2
+        - 1.13.4
         arch:
-          - amd64
+        - amd64
       # - emqx-enterprise # TODO test enterprise
 
     steps:
+    - uses: erlef/setup-beam@v1
+      with:
+        otp-version: "24.2"
     - uses: actions/download-artifact@v2
       with:
         name: source
@@ -149,74 +138,75 @@ jobs:
     - name: unzip source code
       run: unzip -q source.zip
 
-    - name: Get deps git refs for cache
-      id: deps-refs
-      run: |
-        cd source
-        make ensure-rebar3
-        sudo cp rebar3 /usr/local/bin/rebar3
-        scripts/get-dep-refs.sh
-    - name: load rocksdb cache
-      uses: actions/cache@v2
-      with:
-        path: source/_build/default/lib/rocksdb/
-        key: ${{ matrix.os }}-${{ matrix.otp }}-${{ matrix.arch }}-${{ steps.deps-refs.outputs.DEP_ROCKSDB_REF }}
-    - name: load quicer cache
-      uses: actions/cache@v2
-      with:
-        path: source/_build/default/lib/quicer/
-        key: ${{ matrix.os }}-${{ matrix.otp }}-${{ matrix.arch }}-${{ steps.deps-refs.outputs.DEP_QUICER_REF }}
-
     - name: make docker image
       working-directory: source
       env:
-        EMQX_BUILDER: ghcr.io/emqx/emqx-builder/5.0-5:${{ matrix.elixir }}-${{ matrix.otp }}-${{ matrix.os }}
+        EMQX_BUILDER: ghcr.io/emqx/emqx-builder/5.0-17:${{ matrix.elixir }}-${{ matrix.otp }}-${{ matrix.os[0] }}
+        EMQX_RUNNER: ${{ matrix.os[1] }}
       run: |
         make ${{ matrix.profile }}-docker
         echo "TARGET=emqx/${{ matrix.profile }}" >> $GITHUB_ENV
         echo "EMQX_TAG=$(./pkg-vsn.sh ${{ matrix.profile }})" >> $GITHUB_ENV
     - run: minikube start
+    - run: minikube image load $TARGET:$EMQX_TAG
     - name: run emqx on chart
-      timeout-minutes: 5
       working-directory: source
+      if: matrix.discovery == 'k8s'
       run: |
-        minikube image load $TARGET:$EMQX_TAG
-
-        sed -i -r "s/^appVersion: .*$/appVersion: \"$EMQX_TAG\"/g" deploy/charts/emqx/Chart.yaml
-
-        helm install emqx \
+        helm install ${{ matrix.profile }} \
+            --set emqxConfig.EMQX_CLUSTER__DISCOVERY_STRATEGY="k8s" \
+            --set emqxConfig.EMQX_CLUSTER__K8S__APISERVER="https://kubernetes.default.svc:443" \
+            --set emqxConfig.EMQX_CLUSTER__K8S__SERVICE_NAME="${{ matrix.profile }}-headless" \
+            --set emqxConfig.EMQX_CLUSTER__K8S__NAMESPACE="default" \
             --set image.repository=$TARGET \
             --set image.pullPolicy=Never \
+            --set image.tag=$EMQX_TAG \
             --set emqxAclConfig="" \
-            --set image.pullPolicy=Never \
             --set emqxConfig.EMQX_ZONES__DEFAULT__MQTT__RETRY_INTERVAL=2s \
             --set emqxConfig.EMQX_ZONES__DEFAULT__MQTT__MAX_TOPIC_ALIAS=10 \
-            deploy/charts/emqx \
+            --set emqxConfig.EMQX_AUTHORIZATION__SOURCES=[] \
+            --set emqxConfig.EMQX_AUTHORIZATION__NO_MATCH=allow \
+            deploy/charts/${{ matrix.profile }} \
             --debug
-
-        while [ "$(kubectl get StatefulSet -l app.kubernetes.io/name=emqx -o jsonpath='{.items[0].status.replicas}')" \
-          != "$(kubectl get StatefulSet -l app.kubernetes.io/name=emqx -o jsonpath='{.items[0].status.readyReplicas}')" ]; do
+    - name: run emqx on chart
+      working-directory: source
+      if: matrix.discovery == 'dns'
+      run: |
+        helm install ${{ matrix.profile }} \
+            --set emqxConfig.EMQX_CLUSTER__DISCOVERY_STRATEGY="dns" \
+            --set emqxConfig.EMQX_CLUSTER__DNS__RECORD_TYPE="srv" \
+            --set emqxConfig.EMQX_CLUSTER__DNS__NAME="${{ matrix.profile }}-headless.default.svc.cluster.local" \
+            --set image.repository=$TARGET \
+            --set image.pullPolicy=Never \
+            --set image.tag=$EMQX_TAG \
+            --set emqxAclConfig="" \
+            --set emqxConfig.EMQX_ZONES__DEFAULT__MQTT__RETRY_INTERVAL=2s \
+            --set emqxConfig.EMQX_ZONES__DEFAULT__MQTT__MAX_TOPIC_ALIAS=10 \
+            --set emqxConfig.EMQX_AUTHORIZATION__SOURCES=[] \
+            --set emqxConfig.EMQX_AUTHORIZATION__NO_MATCH=allow \
+            deploy/charts/${{ matrix.profile }} \
+            --debug
+    - name: waiting emqx started
+      timeout-minutes: 10
+      run: |
+        while [ "$(kubectl get StatefulSet -l app.kubernetes.io/instance=${{ matrix.profile }} -o jsonpath='{.items[0].status.replicas}')" \
+          != "$(kubectl get StatefulSet -l app.kubernetes.io/instance=${{ matrix.profile }} -o jsonpath='{.items[0].status.readyReplicas}')" ]; do
           echo "==============================";
           kubectl get pods;
           echo "==============================";
           echo "waiting emqx started";
           sleep 10;
         done
-    - name: get emqx-0 pods log
-      if: failure()
+    - name: Check cluster
+      timeout-minutes: 10
       run: |
-        kubectl describe pods emqx-0
-        kubectl logs emqx-0
-    - name: get emqx-1 pods log
-      if: failure()
-      run: |
-        kubectl describe pods emqx-1
-        kubectl logs emqx-1
-    - name: get emqx-2 pods log
-      if: failure()
-      run: |
-        kubectl describe pods emqx-2
-        kubectl logs emqx-2
+        kubectl port-forward service/${{ matrix.profile }} 18083:18083 > /dev/null &
+        while
+          [ "$(curl --silent --basic -u admin:public -X GET http://127.0.0.1:18083/api/v5/cluster| jq '.nodes|length')" != "3" ];
+        do
+          echo "waiting ${{ matrix.profile }} cluster scale"
+          sleep 1
+        done
     - uses: actions/checkout@v2
       with:
         repository: emqx/paho.mqtt.testing
@@ -227,6 +217,7 @@ jobs:
         pip install pytest
         echo "$HOME/.local/bin" >> $GITHUB_PATH
     - name: run paho test
+      timeout-minutes: 10
       run: |
         port_connected () {
           local server="$1"
@@ -234,7 +225,7 @@ jobs:
           echo > /dev/tcp/${server}/${port} 2>/dev/null
         }
 
-        kubectl port-forward service/emqx 1883:1883 > /dev/null &
+        kubectl port-forward service/${{ matrix.profile }} 1883:1883 > /dev/null &
 
         while ! port_connected localhost 1883; do
           echo server not listening yet...
@@ -242,3 +233,5 @@ jobs:
         done
 
         pytest -v paho.mqtt.testing/interoperability/test_client/V5/test_connect.py -k test_basic --host "127.0.0.1"
+    - if: failure()
+      run: kubectl logs -l "app.kubernetes.io/instance=${{ matrix.profile }}" -c emqx --tail=1000

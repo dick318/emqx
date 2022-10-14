@@ -19,58 +19,45 @@
 -behaviour(hocon_schema).
 
 -include_lib("typerefl/include/types.hrl").
+-include_lib("hocon/include/hoconsc.hrl").
 
--export([ roots/0
-        , fields/1
-        ]).
+-export([
+    namespace/0,
+    roots/0,
+    fields/1
+]).
+
+namespace() -> "authn-psk".
 
 roots() -> ["psk_authentication"].
 
 fields("psk_authentication") ->
-    #{fields => fields(),
-      desc => """PSK stands for 'Pre-Shared Keys'.
-This config to enable TLS-PSK authentication.
-
-<strong>Important!</strong> Make sure the SSL listener with
-only <code>tlsv1.2</code> enabled, and also PSK cipher suites
-configured, such as <code>RSA-PSK-AES256-GCM-SHA384</code>.
-See listener SSL options config for more details.
-
-The IDs and secrets can be provided from a file the path
-to which is configurable by the <code>init_file</code> field.
-"""
-     }.
+    #{
+        fields => fields(),
+        desc => ?DESC(psk_authentication)
+    }.
 
 fields() ->
-    [ {enable, fun enable/1}
-    , {init_file, fun init_file/1}
-    , {separator, fun separator/1}
-    , {chunk_size, fun chunk_size/1}
+    [
+        {enable,
+            ?HOCON(boolean(), #{
+                default => false,
+                require => true,
+                desc => ?DESC(enable)
+            })},
+        {init_file,
+            ?HOCON(binary(), #{
+                required => false,
+                desc => ?DESC(init_file)
+            })},
+        {separator,
+            ?HOCON(binary(), #{
+                default => <<":">>,
+                desc => ?DESC(separator)
+            })},
+        {chunk_size,
+            ?HOCON(integer(), #{
+                default => 50,
+                desc => ?DESC(chunk_size)
+            })}
     ].
-
-enable(type) -> boolean();
-enable(desc) -> <<"Whether to enable TLS PSK support">>;
-enable(default) -> false;
-enable(_) -> undefined.
-
-init_file(type) -> binary();
-init_file(desc) ->
-    <<"If init_file is specified, emqx will import PSKs from the file ",
-      "into the built-in database at startup for use by the runtime. ",
-      "The file has to be structured line-by-line, each line must be in ",
-      "the format of 'PSKIdentity:SharedSecret' for example: ",
-      "<code>mydevice1:c2VjcmV0</code>">>;
-init_file(nullable) -> true;
-init_file(_) -> undefined.
-
-separator(type) -> binary();
-separator(desc) ->
-    <<"The separator between PSKIdentity and SharedSecret in the psk file">>;
-separator(default) -> <<":">>;
-separator(_) -> undefined.
-
-chunk_size(type) -> integer();
-chunk_size(desc) ->
-    <<"The size of each chunk used to import to the built-in database from psk file">>;
-chunk_size(default) -> 50;
-chunk_size(_) -> undefined.

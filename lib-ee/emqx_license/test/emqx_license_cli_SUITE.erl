@@ -25,21 +25,18 @@ end_per_suite(_) ->
 
 init_per_testcase(_Case, Config) ->
     {ok, _} = emqx_cluster_rpc:start_link(node(), emqx_cluster_rpc, 1000),
-    meck:new(emqx_license_parser, [passthrough]),
-    meck:expect(emqx_license_parser, public_key, fun public_key/0),
     Config.
 
 end_per_testcase(_Case, _Config) ->
-    meck:unload(emqx_license_parser),
     ok.
 
 set_special_configs(emqx_license) ->
-    Config = #{file => emqx_license_test_lib:default_license()},
+    Config = #{key => emqx_license_test_lib:default_license()},
     emqx_config:put([license], Config),
-    RawConfig = #{<<"file">> => emqx_license_test_lib:default_license()},
+    RawConfig = #{<<"key">> => emqx_license_test_lib:default_license()},
     emqx_config:put_raw([<<"license">>], RawConfig);
-
-set_special_configs(_) -> ok.
+set_special_configs(_) ->
+    ok.
 
 %%------------------------------------------------------------------------------
 %% Tests
@@ -51,22 +48,8 @@ t_help(_Config) ->
 t_info(_Config) ->
     _ = emqx_license_cli:license(["info"]).
 
-t_reload(_Config) ->
-    _ = emqx_license_cli:license(["reload", "/invalid/path"]),
-    _ = emqx_license_cli:license(["reload", emqx_license_test_lib:default_license()]),
-    _ = emqx_license_cli:license(["reload"]).
-
 t_update(_Config) ->
-    {ok, LicenseValue} = file:read_file(emqx_license_test_lib:default_license()),
+    LicenseValue = emqx_license_test_lib:default_license(),
     _ = emqx_license_cli:license(["update", LicenseValue]),
     _ = emqx_license_cli:license(["reload"]),
     _ = emqx_license_cli:license(["update", "Invalid License Value"]).
-
-%%------------------------------------------------------------------------------
-%% Helpers
-%%------------------------------------------------------------------------------
-
-public_key() -> <<"MEgCQQChzN6lCUdt4sYPQmWBYA3b8Zk87Jfk+1A1zcTd+lCU0Tf
-                  vXhSHgEWz18No4lL2v1n+70CoYpc2fzfhNJitgnV9AgMBAAE=">>.
-
-digest() -> <<"3jHg0zCb4NL5v8eIoKn+CNDMq8A04mXEOefqlUBSSVs=">>.
